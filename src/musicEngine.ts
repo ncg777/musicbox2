@@ -8,7 +8,7 @@ const MAX_VOICES = 64;
 const OCTAVE_MIN = 4;
 const OCTAVE_MAX = 7;
 const BARS_PER_HYPERBAR = 8;
-const NUM_VOICES = 2;  // Florid counterpoint with 2 voices
+const NUM_VOICES = 2;  // Florid counterpoint with 2 voices (strum, florid) - arpeggio is independent
 
 // User-configurable parameters with defaults
 export interface EnvelopeParams {
@@ -283,6 +283,13 @@ export class MusicEngine {
   private strumPatternIndex: number = 0;  // Current position in strum pattern
   private currentStrumPattern: number[] = [];  // Current strum pattern (indices into chord)
   
+  // Arpeggio pattern state for voice 2 (independent regular meter)
+  private arpeggioIndex: number = 0;  // Current position in arpeggio
+  private arpeggioDirection: number = 1;  // 1 for up, -1 for down
+  private arpeggioOctave: number = 5;  // Current octave for arpeggio voice
+  private arpeggioStepsRemaining: number = 0;  // Steps remaining in current direction
+  private nextArpeggioTime: number = 0;  // Next scheduled arpeggio note time
+  
   // Callbacks
   onChordChange?: (chord: string) => void;
   onNoteTriggered?: (pitchClass: number) => void;
@@ -298,6 +305,8 @@ export class MusicEngine {
       const baseOctave = Math.floor((OCTAVE_MIN + OCTAVE_MAX) / 2);
       this.currentOctaves.push(baseOctave + (i === 0 ? 0 : 1));  // Voice 0 lower, Voice 1 higher
     }
+    this.arpeggioOctave = Math.floor((OCTAVE_MIN + OCTAVE_MAX) / 2);
+    this.arpeggioStepsRemaining = 0;
     this.setupMediaSession();
   }
 
@@ -533,6 +542,11 @@ export class MusicEngine {
       
       // Generate a new strumming pattern for this chord
       this.generateStrumPattern();
+      
+      // Clamp arpeggio index to new chord size (keep direction and steps)
+      if (this.arpeggioIndex >= this.activePitchClasses.length) {
+        this.arpeggioIndex = this.activePitchClasses.length - 1;
+      }
       
       if (this.onChordChange) {
         this.onChordChange(chord.toString());
@@ -871,7 +885,7 @@ export class MusicEngine {
       // Advance through the strum pattern
       this.strumPatternIndex = (this.strumPatternIndex + 1) % this.currentStrumPattern.length;
     } else {
-      // Voice 1+: Random florid counterpoint
+      // Voice 1: Random florid counterpoint
       pitchClass = this.activePitchClasses[
         Math.floor(Math.random() * this.activePitchClasses.length)
       ];
@@ -891,6 +905,64 @@ export class MusicEngine {
     const duration = maxDurationSeconds * (0.5 + Math.random() * 0.5);
 
     console.log('Triggering note:', { voice: voiceIndex, pitchClass, octave, frequency: frequency.toFixed(1), whenTime: whenTime.toFixed(2) });
+    
+    this.triggerNote(frequency, whenTime, duration);
+    
+    if (this.onNoteTriggered) {
+      this.onNoteTriggered(pitchClass);
+    }
+  }
+
+  /**
+   * Trigger an arpeggio note - independent voice with regular meter and variable up/down patterns
+   */
+  private triggerArpeggioNote(whenTime: number): void {
+    if (this.activePitchClasses.length === 0) {
+      return;
+    }
+
+    // Get current pitch class from arpeggio position
+    const pitchClass = this.activePitchClasses[this.arpeggioIndex];
+    
+    // Check if we need to pick a new direction and step count
+    if (this.arpeggioStepsRemaining <= 0) {
+      // Pick a random number of steps (2 to 6) and a random direction
+      this.arpeggioStepsRemaining = 2 + Math.floor(Math.random() * 5);  // 2-6 steps
+      // Randomly decide direction, but bias towards reversing if at edges
+      if (this.arpeggioIndex <= 0) {
+        this.arpeggioDirection = 1;  // Must go up
+      } else if (this.arpeggioIndex >= this.activePitchClasses.length - 1) {
+        this.arpeggioDirection = -1;  // Must go down
+      } else {
+        this.arpeggioDirection = Math.random() < 0.5 ? 1 : -1;  // Random
+      }
+    }
+    
+    // Move to next note in arpeggio
+    this.arpeggioIndex += this.arpeggioDirection;
+    this.arpeggioStepsRemaining--;
+    
+    // Handle boundary wrapping with octave changes
+    if (this.arpeggioIndex >= this.activePitchClasses.length) {
+      // Wrap to bottom, go up an octave
+      this.arpeggioIndex = 0;
+      if (this.arpeggioOctave < OCTAVE_MAX) {
+        this.arpeggioOctave++;
+      }
+    } else if (this.arpeggioIndex < 0) {
+      // Wrap to top, go down an octave
+      this.arpeggioIndex = this.activePitchClasses.length - 1;
+      if (this.arpeggioOctave > OCTAVE_MIN) {
+        this.arpeggioOctave--;
+      }
+    }
+    
+    const midi = this.arpeggioOctave * 12 + pitchClass;
+    const frequency = midiToFreq(midi);
+    // Arpeggio notes are shorter and more consistent
+    const duration = this.sixteenthSeconds * 0.9;
+
+    console.log('Triggering arpeggio:', { pitchClass, octave: this.arpeggioOctave, frequency: frequency.toFixed(1), whenTime: whenTime.toFixed(2) });
     
     this.triggerNote(frequency, whenTime, duration);
     
@@ -926,6 +998,14 @@ export class MusicEngine {
       } else {
         break;
       }
+    }
+
+    // Schedule arpeggio notes independently on regular 8th note intervals
+    const eighthNoteSeconds = this.sixteenthSeconds * 2;  // 8th note = 2 x 16th
+    while (this.nextArpeggioTime <= currentTime + lookAhead) {
+      const noteTime = Math.max(this.nextArpeggioTime, currentTime + 0.02);
+      this.triggerArpeggioNote(noteTime);
+      this.nextArpeggioTime += eighthNoteSeconds;
     }
 
     // Schedule next check
@@ -990,8 +1070,15 @@ export class MusicEngine {
       // Reset octaves for each voice
       for (let i = 0; i < NUM_VOICES; i++) {
         const baseOctave = Math.floor((OCTAVE_MIN + OCTAVE_MAX) / 2);
-        this.currentOctaves[i] = baseOctave + (i === 0 ? 0 : 1);
+        this.currentOctaves[i] = baseOctave + (i === 0 ? 0 : 1);  // Voice 0 lower, Voice 1 higher
       }
+      
+      // Reset arpeggio state
+      this.arpeggioIndex = 0;
+      this.arpeggioDirection = 1;
+      this.arpeggioOctave = Math.floor((OCTAVE_MIN + OCTAVE_MAX) / 2);
+      this.arpeggioStepsRemaining = 0;  // Will pick new direction/steps on first note
+      this.nextArpeggioTime = startTime;  // Start arpeggio immediately
       
       // Reset bar index
       this.currentBarIndex = -1;
