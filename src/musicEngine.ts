@@ -319,6 +319,8 @@ export class MusicEngine {
   // Strumming pattern state for voice 0
   private strumPatternIndex: number = 0;  // Current position in strum pattern
   private currentStrumPattern: number[] = [];  // Current strum pattern (indices into chord)
+  private strumTriggerCounter: number = 0;  // Counter for slowing down strum triggers
+  private readonly STRUM_DIVISOR: number = 2;  // Play strum note every Nth trigger (2 = half speed)
   
   // Arpeggio pattern state for voice 2 (independent regular meter)
   private arpeggioIndex: number = 0;  // Current position in arpeggio
@@ -958,7 +960,13 @@ export class MusicEngine {
     let pitchClass: number;
     
     if (voiceIndex === 0 && this.currentStrumPattern.length > 0) {
-      // Voice 0: Strumming pattern - follow the generated pattern
+      // Voice 0: Strumming pattern - follow the generated pattern at slower rate
+      this.strumTriggerCounter++;
+      if (this.strumTriggerCounter < this.STRUM_DIVISOR) {
+        return;  // Skip this trigger to slow down the strum
+      }
+      this.strumTriggerCounter = 0;
+      
       const chordIndex = this.currentStrumPattern[this.strumPatternIndex];
       pitchClass = this.activePitchClasses[Math.min(chordIndex, this.activePitchClasses.length - 1)];
       
