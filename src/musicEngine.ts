@@ -1,6 +1,72 @@
 import { Pcs12 } from './pcs12';
-import pcsGraphData from './pcsGraphData.json';
 import rhythmGraphData from './rhythmGraphData.json';
+
+// Bebop scale: 8-23.00 = pitches 0,1,2,3,5,7,8,10
+// For 8-23.X, KEY = X - 4
+const BEBOP_SCALE_BASE = [0, 1, 2, 3, 5, 7, 8, 10];
+
+/**
+ * Get the bebop scale rotated by the given amount (transposition).
+ * Returns the pitch classes of the rotated scale.
+ */
+function getBebopScale(rotation: number): number[] {
+  return BEBOP_SCALE_BASE.map(pc => (pc + rotation + 12) % 12).sort((a, b) => a - b);
+}
+
+/**
+ * Get the KEY for a given bebop scale rotation.
+ * KEY = rotation - 4 (mod 12)
+ */
+function getKeyFromRotation(rotation: number): number {
+  return ((rotation - 4) % 12 + 12) % 12;
+}
+
+/**
+ * Generate all subsets of a given size from the scale pitches.
+ * Filters out dissonant chords (those with minor second intervals).
+ */
+function generateSubsets(scale: number[], size: number): Pcs12[] {
+  const subsets: Pcs12[] = [];
+  const n = scale.length;
+  
+  // Generate all combinations of 'size' elements from scale
+  function combine(start: number, current: number[]): void {
+    if (current.length === size) {
+      const pcs = new Pcs12(new Set(current));
+      // Filter out chords with minor second intervals (interval vector position 0 > 0)
+      const iv = pcs.getIntervalVector();
+      if (iv[0] === 0) {  // No minor seconds
+        subsets.push(pcs);
+      }
+      return;
+    }
+    for (let i = start; i < n; i++) {
+      combine(i + 1, [...current, scale[i]]);
+    }
+  }
+  
+  combine(0, []);
+  return subsets;
+}
+
+/**
+ * Compare two Pcs12 after rotating by KEY for sorting.
+ * This sorts chords relative to the current key center.
+ */
+function comparePcsByKey(a: Pcs12, b: Pcs12, key: number): number {
+  const aRotated = a.rotate(-key);  // Rotate to key-relative position
+  const bRotated = b.rotate(-key);
+  const aSeq = aRotated.asSequence();
+  const bSeq = bRotated.asSequence();
+  
+  // Compare as sequences (lexicographic)
+  for (let i = 0; i < Math.min(aSeq.length, bSeq.length); i++) {
+    if (aSeq[i] !== bSeq[i]) {
+      return aSeq[i] - bSeq[i];
+    }
+  }
+  return aSeq.length - bSeq.length;
+}
 
 // Default constants
 const DEFAULT_BPM = 45;
@@ -142,39 +208,6 @@ interface Voice {
 }
 
 /**
- * PCS Relation Graph for navigating between pitch class sets.
- * Uses precomputed graph data for instant initialization.
- */
-class PcsRelationGraph {
-  private nodes: Pcs12[];
-  private adjacency: number[][];
-  private currentIndex: number;
-
-  constructor() {
-    // Load precomputed data
-    this.nodes = pcsGraphData.nodes.map(str => Pcs12.fromBinaryString(str));
-    this.adjacency = pcsGraphData.adjacency;
-    this.currentIndex = Math.floor(Math.random() * this.nodes.length);
-  }
-
-  current(): Pcs12 {
-    return this.nodes[this.currentIndex];
-  }
-
-  advance(): void {
-    if (this.nodes.length === 0) return;
-
-    const neighbors = this.adjacency[this.currentIndex];
-    if (neighbors.length > 0) {
-      this.currentIndex = neighbors[Math.floor(Math.random() * neighbors.length)];
-      return;
-    }
-    
-    this.currentIndex = Math.floor(Math.random() * this.nodes.length);
-  }
-}
-
-/**
  * Rhythm Relation Graph for navigating between rhythms.
  * Uses precomputed graph data from 8-hex rhythm pairs.
  */
@@ -256,12 +289,16 @@ export class MusicEngine {
   private delayWetGain: GainNode | null = null;
   private delayInputGain: GainNode | null = null;
   private isPlaying: boolean = false;
-  private pcsGraph: PcsRelationGraph;
   private rhythmGraph: RhythmRelationGraph;
   private activePitchClasses: number[] = [];
   private voices: Voice[] = [];
   private schedulerId: number | null = null;
   private synthParams: SynthParams = JSON.parse(JSON.stringify(DEFAULT_SYNTH_PARAMS));
+  
+  // Bebop scale state
+  private currentScaleRotation: number = 0;  // Current bebop scale rotation (0-11)
+  private currentScale: number[] = BEBOP_SCALE_BASE;  // Current scale pitches
+  private currentKey: number = 0;  // KEY = rotation - 4
   
   // Timing parameters
   private bpm: number = DEFAULT_BPM;
@@ -296,8 +333,11 @@ export class MusicEngine {
   onPlayStateChange?: (isPlaying: boolean) => void;
 
   constructor() {
-    this.pcsGraph = new PcsRelationGraph();
     this.rhythmGraph = new RhythmRelationGraph();
+    // Initialize bebop scale at a random rotation
+    this.currentScaleRotation = Math.floor(Math.random() * 12);
+    this.currentScale = getBebopScale(this.currentScaleRotation);
+    this.currentKey = getKeyFromRotation(this.currentScaleRotation);
     // Initialize octaves for each voice at different starting positions
     this.currentOctaves = [];
     for (let i = 0; i < NUM_VOICES; i++) {
@@ -474,11 +514,22 @@ export class MusicEngine {
   }
 
   /**
-   * Generate a new hyperbar: perform random walks of 5 for both rhythms and chords,
-   * arrange them as [3, 2, 1, 0, 1, 2, 3, 4] for 8 bars (synchronized)
+   * Generate a new hyperbar using bebop scale-based chord generation.
+   * - Rotate the bebop scale a fifth up or down
+   * - Generate 4 random subset chords from the current scale
+   * - Sort them by KEY, then use sequence [0,2,3,1]
+   * - Each chord lasts 2 bars (4 chords × 2 bars = 8 bars)
    */
   private generateHyperbar(): void {
-    // Generate rhythm sequence
+    // Rotate the bebop scale a fifth up or down (±7 semitones)
+    const direction = Math.random() < 0.5 ? 7 : -7;
+    this.currentScaleRotation = ((this.currentScaleRotation + direction) % 12 + 12) % 12;
+    this.currentScale = getBebopScale(this.currentScaleRotation);
+    this.currentKey = getKeyFromRotation(this.currentScaleRotation);
+    
+    console.log('New bebop scale rotation:', this.currentScaleRotation, 'KEY:', this.currentKey, 'Scale:', this.currentScale);
+    
+    // Generate rhythm sequence (still using the walk pattern)
     const walkRhythms = this.rhythmGraph.randomWalk(5);
     
     if (walkRhythms.length < 5) {
@@ -491,14 +542,43 @@ export class MusicEngine {
       this.currentHyperbarRhythms = [r3, r2, r1, r0, r1, r2, r3, r4];
     }
     
-    // Generate chord sequence (same pattern: c3, c2, c1, c0, c1, c2, c3, c4)
-    const chordWalk: Pcs12[] = [];
-    for (let i = 0; i < 5; i++) {
-      chordWalk.push(this.pcsGraph.current());
-      this.pcsGraph.advance();
+    // Generate 4 random subset chords from the current bebop scale
+    // Use 3-5 note chords for variety
+    const chordSizes = [3, 4, 4, 5];  // Mix of chord sizes
+    const allSubsets: Pcs12[][] = chordSizes.map(size => generateSubsets(this.currentScale, size));
+    
+    // Pick 4 random chords (one from each size category for variety)
+    const fourChords: Pcs12[] = [];
+    for (let i = 0; i < 4; i++) {
+      const subsets = allSubsets[i];
+      if (subsets.length > 0) {
+        fourChords.push(subsets[Math.floor(Math.random() * subsets.length)]);
+      } else {
+        // Fallback: use the full scale
+        fourChords.push(new Pcs12(new Set(this.currentScale)));
+      }
     }
-    const [c0, c1, c2, c3, c4] = chordWalk;
-    this.currentHyperbarChords = [c3, c2, c1, c0, c1, c2, c3, c4];
+    
+    // Sort chords by KEY (rotate by -KEY before comparison)
+    fourChords.sort((a, b) => comparePcsByKey(a, b, this.currentKey));
+    
+    // Use sequence [0, 2, 3, 1] to determine chord order
+    const chordSequence = [
+      fourChords[0],
+      fourChords[2],
+      fourChords[3],
+      fourChords[1]
+    ];
+    
+    // Each chord lasts 2 bars: [c0, c0, c1, c1, c2, c2, c3, c3]
+    this.currentHyperbarChords = [
+      chordSequence[0], chordSequence[0],
+      chordSequence[1], chordSequence[1],
+      chordSequence[2], chordSequence[2],
+      chordSequence[3], chordSequence[3]
+    ];
+    
+    console.log('Hyperbar chords:', this.currentHyperbarChords.map(c => c.toString()));
     
     // Reset bar index
     this.currentBarIndex = -1;  // Will be set to 0 on first note
