@@ -200,6 +200,43 @@ function midiToFreq(midi: number): number {
   return 440 * Math.pow(2, (midi - 69) / 12);
 }
 
+/**
+ * Compute GCD using Euclidean algorithm
+ */
+function gcd(a: number, b: number): number {
+  while (b !== 0) {
+    const t = b;
+    b = a % b;
+    a = t;
+  }
+  return a;
+}
+
+/**
+ * Get all numbers coprime with n (for permutation generation)
+ */
+function getCoprimes(n: number): number[] {
+  const coprimes: number[] = [];
+  for (let k = 1; k < n; k++) {
+    if (gcd(k, n) === 1) {
+      coprimes.push(k);
+    }
+  }
+  return coprimes.length > 0 ? coprimes : [1];  // Fallback to 1 if n=1
+}
+
+/**
+ * Generate a permutation of indices 0..n-1 using multiplier k mod n
+ * Formula: permutation[i] = (i * k) % n
+ */
+function generateMultiplierPermutation(n: number, k: number): number[] {
+  const perm: number[] = [];
+  for (let i = 0; i < n; i++) {
+    perm.push((i * k) % n);
+  }
+  return perm;
+}
+
 interface Voice {
   oscillator: OscillatorNode | null;
   gainNode: GainNode | null;
@@ -328,6 +365,7 @@ export class MusicEngine {
   private arpeggioOctave: number = 5;  // Current octave for arpeggio voice
   private arpeggioStepsRemaining: number = 0;  // Steps remaining in current direction
   private nextArpeggioTime: number = 0;  // Next scheduled arpeggio note time
+  private arpeggioSequence: number[] = [];  // Permuted arpeggio sequence (pitch classes)
   
   // Callbacks
   onChordChange?: (chord: string) => void;
@@ -625,15 +663,45 @@ export class MusicEngine {
       // Generate a new strumming pattern for this chord
       this.generateStrumPattern();
       
-      // Clamp arpeggio index to new chord size (keep direction and steps)
-      if (this.arpeggioIndex >= this.activePitchClasses.length) {
-        this.arpeggioIndex = this.activePitchClasses.length - 1;
-      }
+      // Generate a new permuted arpeggio sequence
+      this.generateArpeggioSequence();
+      
+      // Reset arpeggio index to start of new sequence
+      this.arpeggioIndex = 0;
       
       if (this.onChordChange) {
         this.onChordChange(chord.toString());
       }
     }
+  }
+
+  /**
+   * Generate a permuted arpeggio sequence using a random coprime multiplier.
+   * For n notes, picks a random k coprime with n, then permutes indices as (i * k) % n
+   */
+  private generateArpeggioSequence(): void {
+    const n = this.activePitchClasses.length;
+    if (n === 0) {
+      this.arpeggioSequence = [];
+      return;
+    }
+    
+    if (n === 1) {
+      this.arpeggioSequence = [this.activePitchClasses[0]];
+      return;
+    }
+    
+    // Get all coprimes with n and pick one randomly
+    const coprimes = getCoprimes(n);
+    const k = coprimes[Math.floor(Math.random() * coprimes.length)];
+    
+    // Generate permutation: perm[i] = (i * k) % n
+    const permutation = generateMultiplierPermutation(n, k);
+    
+    // Apply permutation to pitch classes
+    this.arpeggioSequence = permutation.map(idx => this.activePitchClasses[idx]);
+    
+    console.log('Arpeggio permutation: n=', n, 'k=', k, 'sequence=', this.arpeggioSequence);
   }
 
   /**
@@ -1005,12 +1073,12 @@ export class MusicEngine {
    * Trigger an arpeggio note - independent voice with regular meter and variable up/down patterns
    */
   private triggerArpeggioNote(whenTime: number): void {
-    if (this.activePitchClasses.length === 0) {
+    if (this.arpeggioSequence.length === 0) {
       return;
     }
 
-    // Get current pitch class from arpeggio position
-    const pitchClass = this.activePitchClasses[this.arpeggioIndex];
+    // Get current pitch class from permuted arpeggio sequence
+    const pitchClass = this.arpeggioSequence[this.arpeggioIndex];
     
     // Check if we need to pick a new direction and step count
     if (this.arpeggioStepsRemaining <= 0) {
@@ -1019,7 +1087,7 @@ export class MusicEngine {
       // Randomly decide direction, but bias towards reversing if at edges
       if (this.arpeggioIndex <= 0) {
         this.arpeggioDirection = 1;  // Must go up
-      } else if (this.arpeggioIndex >= this.activePitchClasses.length - 1) {
+      } else if (this.arpeggioIndex >= this.arpeggioSequence.length - 1) {
         this.arpeggioDirection = -1;  // Must go down
       } else {
         this.arpeggioDirection = Math.random() < 0.5 ? 1 : -1;  // Random
@@ -1031,7 +1099,7 @@ export class MusicEngine {
     this.arpeggioStepsRemaining--;
     
     // Handle boundary wrapping with octave changes
-    if (this.arpeggioIndex >= this.activePitchClasses.length) {
+    if (this.arpeggioIndex >= this.arpeggioSequence.length) {
       // Wrap to bottom, go up an octave
       this.arpeggioIndex = 0;
       if (this.arpeggioOctave < OCTAVE_MAX) {
@@ -1039,7 +1107,7 @@ export class MusicEngine {
       }
     } else if (this.arpeggioIndex < 0) {
       // Wrap to top, go down an octave
-      this.arpeggioIndex = this.activePitchClasses.length - 1;
+      this.arpeggioIndex = this.arpeggioSequence.length - 1;
       if (this.arpeggioOctave > OCTAVE_MIN) {
         this.arpeggioOctave--;
       }
@@ -1302,6 +1370,7 @@ export class MusicEngine {
     const savedArpeggioDirection = this.arpeggioDirection;
     const savedArpeggioOctave = this.arpeggioOctave;
     const savedArpeggioSteps = this.arpeggioStepsRemaining;
+    const savedArpeggioSequence = [...this.arpeggioSequence];
     const savedOctaves = [...this.currentOctaves];
     
     // Reset state for rendering
@@ -1337,9 +1406,8 @@ export class MusicEngine {
             const chord = this.currentHyperbarChords[barIndex];
             this.activePitchClasses = chord.asSequence();
             this.generateStrumPattern();
-            if (this.arpeggioIndex >= this.activePitchClasses.length) {
-              this.arpeggioIndex = Math.max(0, this.activePitchClasses.length - 1);
-            }
+            this.generateArpeggioSequence();
+            this.arpeggioIndex = 0;
           }
         }
         
@@ -1388,14 +1456,14 @@ export class MusicEngine {
           }
           
           // Arpeggio notes during this time window
-          while (nextArpTime <= noteTime + this.sixteenthSeconds && this.activePitchClasses.length > 0) {
-            const pitchClass = this.activePitchClasses[this.arpeggioIndex];
+          while (nextArpTime <= noteTime + this.sixteenthSeconds && this.arpeggioSequence.length > 0) {
+            const pitchClass = this.arpeggioSequence[this.arpeggioIndex];
             
             if (this.arpeggioStepsRemaining <= 0) {
               this.arpeggioStepsRemaining = 2 + Math.floor(Math.random() * 5);
               if (this.arpeggioIndex <= 0) {
                 this.arpeggioDirection = 1;
-              } else if (this.arpeggioIndex >= this.activePitchClasses.length - 1) {
+              } else if (this.arpeggioIndex >= this.arpeggioSequence.length - 1) {
                 this.arpeggioDirection = -1;
               } else {
                 this.arpeggioDirection = Math.random() < 0.5 ? 1 : -1;
@@ -1405,11 +1473,11 @@ export class MusicEngine {
             this.arpeggioIndex += this.arpeggioDirection;
             this.arpeggioStepsRemaining--;
             
-            if (this.arpeggioIndex >= this.activePitchClasses.length) {
+            if (this.arpeggioIndex >= this.arpeggioSequence.length) {
               this.arpeggioIndex = 0;
               if (this.arpeggioOctave < OCTAVE_MAX) this.arpeggioOctave++;
             } else if (this.arpeggioIndex < 0) {
-              this.arpeggioIndex = this.activePitchClasses.length - 1;
+              this.arpeggioIndex = this.arpeggioSequence.length - 1;
               if (this.arpeggioOctave > OCTAVE_MIN) this.arpeggioOctave--;
             }
             
@@ -1437,6 +1505,7 @@ export class MusicEngine {
     this.arpeggioDirection = savedArpeggioDirection;
     this.arpeggioOctave = savedArpeggioOctave;
     this.arpeggioStepsRemaining = savedArpeggioSteps;
+    this.arpeggioSequence = savedArpeggioSequence;
     this.currentOctaves = savedOctaves;
     
     return events.sort((a, b) => a.time - b.time);
