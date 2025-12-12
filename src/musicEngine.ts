@@ -1284,4 +1284,393 @@ export class MusicEngine {
   getIsPlaying(): boolean {
     return this.isPlaying;
   }
+
+  /**
+   * Interface for a scheduled note event (for offline rendering)
+   */
+  private generateNoteEvents(numHyperbars: number): { time: number; frequency: number; duration: number; midi: number; velocity: number }[] {
+    const events: { time: number; frequency: number; duration: number; midi: number; velocity: number }[] = [];
+    
+    // Save current state
+    const savedScaleRotation = this.currentScaleRotation;
+    const savedScale = [...this.currentScale];
+    const savedKey = this.currentKey;
+    const savedBarIndex = this.currentBarIndex;
+    const savedStrumIndex = this.strumPatternIndex;
+    const savedStrumCounter = this.strumTriggerCounter;
+    const savedArpeggioIndex = this.arpeggioIndex;
+    const savedArpeggioDirection = this.arpeggioDirection;
+    const savedArpeggioOctave = this.arpeggioOctave;
+    const savedArpeggioSteps = this.arpeggioStepsRemaining;
+    const savedOctaves = [...this.currentOctaves];
+    
+    // Reset state for rendering
+    this.currentScaleRotation = Math.floor(Math.random() * 12);
+    this.currentScale = getBebopScale(this.currentScaleRotation);
+    this.currentKey = getKeyFromRotation(this.currentScaleRotation);
+    this.currentBarIndex = -1;
+    this.strumPatternIndex = 0;
+    this.strumTriggerCounter = 0;
+    this.arpeggioIndex = 0;
+    this.arpeggioDirection = 1;
+    this.arpeggioOctave = Math.floor((OCTAVE_MIN + OCTAVE_MAX) / 2);
+    this.arpeggioStepsRemaining = 0;
+    for (let i = 0; i < NUM_VOICES; i++) {
+      const baseOctave = Math.floor((OCTAVE_MIN + OCTAVE_MAX) / 2);
+      this.currentOctaves[i] = baseOctave + (i === 0 ? 0 : 1);
+    }
+    
+    let currentTime = 0;
+    const eighthNoteSeconds = this.sixteenthSeconds * 2;
+    let nextArpTime = 0;
+    
+    for (let hyperbar = 0; hyperbar < numHyperbars; hyperbar++) {
+      // Generate hyperbar data
+      this.generateHyperbar();
+      
+      // Process each bar
+      for (let barIndex = 0; barIndex < BARS_PER_HYPERBAR; barIndex++) {
+        // Update chord if bar changed
+        if (barIndex !== this.currentBarIndex) {
+          this.currentBarIndex = barIndex;
+          if (barIndex >= 0 && barIndex < this.currentHyperbarChords.length) {
+            const chord = this.currentHyperbarChords[barIndex];
+            this.activePitchClasses = chord.asSequence();
+            this.generateStrumPattern();
+            if (this.arpeggioIndex >= this.activePitchClasses.length) {
+              this.arpeggioIndex = Math.max(0, this.activePitchClasses.length - 1);
+            }
+          }
+        }
+        
+        const rhythmHex = this.currentHyperbarRhythms[barIndex];
+        const onsets = parseRhythmHex(rhythmHex);
+        const barStartTime = currentTime + barIndex * this.barSeconds;
+        
+        for (const onset of onsets) {
+          const noteTime = barStartTime + onset * this.sixteenthSeconds;
+          
+          // Process each voice
+          for (let voiceIndex = 0; voiceIndex < NUM_VOICES; voiceIndex++) {
+            const voiceOffset = voiceIndex * this.sixteenthSeconds * 0.25;
+            const eventTime = noteTime + voiceOffset;
+            
+            if (this.activePitchClasses.length === 0) continue;
+            
+            let pitchClass: number;
+            let octave: number;
+            
+            if (voiceIndex === 0 && this.currentStrumPattern.length > 0) {
+              // Voice 0: Strumming pattern with slowdown
+              this.strumTriggerCounter++;
+              if (this.strumTriggerCounter < this.STRUM_DIVISOR) {
+                continue;
+              }
+              this.strumTriggerCounter = 0;
+              
+              const chordIndex = this.currentStrumPattern[this.strumPatternIndex];
+              pitchClass = this.activePitchClasses[Math.min(chordIndex, this.activePitchClasses.length - 1)];
+              this.strumPatternIndex = (this.strumPatternIndex + 1) % this.currentStrumPattern.length;
+            } else {
+              pitchClass = this.activePitchClasses[Math.floor(Math.random() * this.activePitchClasses.length)];
+            }
+            
+            const octaveChange = Math.floor(Math.random() * 3) - 1;
+            this.currentOctaves[voiceIndex] = Math.max(OCTAVE_MIN, Math.min(OCTAVE_MAX, this.currentOctaves[voiceIndex] + octaveChange));
+            octave = this.currentOctaves[voiceIndex];
+            
+            const midi = octave * 12 + pitchClass;
+            const frequency = midiToFreq(midi);
+            const maxDurationSeconds = musicalDurationToSeconds(this.synthParams.maxNoteDuration, this.bpm);
+            const duration = maxDurationSeconds * (0.5 + Math.random() * 0.5);
+            
+            events.push({ time: eventTime, frequency, duration, midi, velocity: 80 });
+          }
+          
+          // Arpeggio notes during this time window
+          while (nextArpTime <= noteTime + this.sixteenthSeconds && this.activePitchClasses.length > 0) {
+            const pitchClass = this.activePitchClasses[this.arpeggioIndex];
+            
+            if (this.arpeggioStepsRemaining <= 0) {
+              this.arpeggioStepsRemaining = 2 + Math.floor(Math.random() * 5);
+              if (this.arpeggioIndex <= 0) {
+                this.arpeggioDirection = 1;
+              } else if (this.arpeggioIndex >= this.activePitchClasses.length - 1) {
+                this.arpeggioDirection = -1;
+              } else {
+                this.arpeggioDirection = Math.random() < 0.5 ? 1 : -1;
+              }
+            }
+            
+            this.arpeggioIndex += this.arpeggioDirection;
+            this.arpeggioStepsRemaining--;
+            
+            if (this.arpeggioIndex >= this.activePitchClasses.length) {
+              this.arpeggioIndex = 0;
+              if (this.arpeggioOctave < OCTAVE_MAX) this.arpeggioOctave++;
+            } else if (this.arpeggioIndex < 0) {
+              this.arpeggioIndex = this.activePitchClasses.length - 1;
+              if (this.arpeggioOctave > OCTAVE_MIN) this.arpeggioOctave--;
+            }
+            
+            const midi = this.arpeggioOctave * 12 + pitchClass;
+            const frequency = midiToFreq(midi);
+            const duration = this.sixteenthSeconds * 0.9;
+            
+            events.push({ time: nextArpTime, frequency, duration, midi, velocity: 60 });
+            nextArpTime += eighthNoteSeconds;
+          }
+        }
+      }
+      
+      currentTime += this.hyperbarSeconds;
+    }
+    
+    // Restore state
+    this.currentScaleRotation = savedScaleRotation;
+    this.currentScale = savedScale;
+    this.currentKey = savedKey;
+    this.currentBarIndex = savedBarIndex;
+    this.strumPatternIndex = savedStrumIndex;
+    this.strumTriggerCounter = savedStrumCounter;
+    this.arpeggioIndex = savedArpeggioIndex;
+    this.arpeggioDirection = savedArpeggioDirection;
+    this.arpeggioOctave = savedArpeggioOctave;
+    this.arpeggioStepsRemaining = savedArpeggioSteps;
+    this.currentOctaves = savedOctaves;
+    
+    return events.sort((a, b) => a.time - b.time);
+  }
+
+  /**
+   * Render to WAV file (offline rendering)
+   */
+  async renderWav(numHyperbars: number): Promise<Blob> {
+    const events = this.generateNoteEvents(numHyperbars);
+    const totalDuration = numHyperbars * this.hyperbarSeconds + 3; // Extra 3 seconds for reverb tail
+    const sampleRate = 44100;
+    
+    // Create offline audio context
+    const offlineCtx = new OfflineAudioContext(2, Math.ceil(totalDuration * sampleRate), sampleRate);
+    
+    // Create master gain
+    const masterGain = offlineCtx.createGain();
+    masterGain.gain.value = 0.5;
+    masterGain.connect(offlineCtx.destination);
+    
+    // Create simple reverb for offline
+    const reverbNode = this.createOfflineReverb(offlineCtx);
+    if (reverbNode) {
+      const dryGain = offlineCtx.createGain();
+      const wetGain = offlineCtx.createGain();
+      dryGain.gain.value = 0.7;
+      wetGain.gain.value = 0.3;
+      masterGain.connect(dryGain);
+      masterGain.connect(reverbNode);
+      reverbNode.connect(wetGain);
+      dryGain.connect(offlineCtx.destination);
+      wetGain.connect(offlineCtx.destination);
+    }
+    
+    const { attack, decay, sustain, release } = this.synthParams.envelope;
+    
+    // Schedule all notes
+    for (const event of events) {
+      const oscillator = offlineCtx.createOscillator();
+      oscillator.type = 'sine';
+      oscillator.frequency.setValueAtTime(event.frequency, event.time);
+      
+      const envelopeGain = offlineCtx.createGain();
+      envelopeGain.gain.setValueAtTime(0, event.time);
+      
+      const peakTime = event.time + attack;
+      const decayEndTime = peakTime + decay;
+      const releaseStartTime = event.time + event.duration;
+      const releaseEndTime = releaseStartTime + release;
+      
+      const gain = 0.15 * (event.velocity / 127);
+      envelopeGain.gain.linearRampToValueAtTime(gain, peakTime);
+      envelopeGain.gain.linearRampToValueAtTime(gain * sustain, decayEndTime);
+      envelopeGain.gain.setValueAtTime(gain * sustain, releaseStartTime);
+      envelopeGain.gain.linearRampToValueAtTime(0, releaseEndTime);
+      
+      oscillator.connect(envelopeGain);
+      envelopeGain.connect(masterGain);
+      
+      oscillator.start(event.time);
+      oscillator.stop(releaseEndTime + 0.1);
+    }
+    
+    // Render
+    const audioBuffer = await offlineCtx.startRendering();
+    
+    // Convert to WAV
+    return this.audioBufferToWav(audioBuffer);
+  }
+
+  private createOfflineReverb(ctx: OfflineAudioContext): ConvolverNode | null {
+    try {
+      const convolver = ctx.createConvolver();
+      const rate = ctx.sampleRate;
+      const length = rate * 2;
+      const impulse = ctx.createBuffer(2, length, rate);
+      const decay = 1.5;
+      
+      for (let channel = 0; channel < 2; channel++) {
+        const channelData = impulse.getChannelData(channel);
+        for (let i = 0; i < length; i++) {
+          const t = i / rate;
+          const envelope = Math.exp(-t / decay);
+          channelData[i] = (Math.random() * 2 - 1) * envelope * 0.3;
+        }
+      }
+      
+      convolver.buffer = impulse;
+      return convolver;
+    } catch (e) {
+      return null;
+    }
+  }
+
+  private audioBufferToWav(buffer: AudioBuffer): Blob {
+    const numChannels = buffer.numberOfChannels;
+    const sampleRate = buffer.sampleRate;
+    const format = 1; // PCM
+    const bitDepth = 16;
+    
+    const bytesPerSample = bitDepth / 8;
+    const blockAlign = numChannels * bytesPerSample;
+    const byteRate = sampleRate * blockAlign;
+    const dataSize = buffer.length * blockAlign;
+    const headerSize = 44;
+    const totalSize = headerSize + dataSize;
+    
+    const arrayBuffer = new ArrayBuffer(totalSize);
+    const view = new DataView(arrayBuffer);
+    
+    // WAV header
+    const writeString = (offset: number, str: string) => {
+      for (let i = 0; i < str.length; i++) {
+        view.setUint8(offset + i, str.charCodeAt(i));
+      }
+    };
+    
+    writeString(0, 'RIFF');
+    view.setUint32(4, totalSize - 8, true);
+    writeString(8, 'WAVE');
+    writeString(12, 'fmt ');
+    view.setUint32(16, 16, true); // fmt chunk size
+    view.setUint16(20, format, true);
+    view.setUint16(22, numChannels, true);
+    view.setUint32(24, sampleRate, true);
+    view.setUint32(28, byteRate, true);
+    view.setUint16(32, blockAlign, true);
+    view.setUint16(34, bitDepth, true);
+    writeString(36, 'data');
+    view.setUint32(40, dataSize, true);
+    
+    // Interleave channels and write samples
+    const channels: Float32Array[] = [];
+    for (let c = 0; c < numChannels; c++) {
+      channels.push(buffer.getChannelData(c));
+    }
+    
+    let offset = 44;
+    for (let i = 0; i < buffer.length; i++) {
+      for (let c = 0; c < numChannels; c++) {
+        const sample = Math.max(-1, Math.min(1, channels[c][i]));
+        const intSample = sample < 0 ? sample * 0x8000 : sample * 0x7FFF;
+        view.setInt16(offset, intSample, true);
+        offset += 2;
+      }
+    }
+    
+    return new Blob([arrayBuffer], { type: 'audio/wav' });
+  }
+
+  /**
+   * Render to MIDI file
+   */
+  renderMidi(numHyperbars: number): Blob {
+    const events = this.generateNoteEvents(numHyperbars);
+    const ticksPerBeat = 480;
+    const microsecondsPerBeat = Math.round(60000000 / this.bpm);
+    
+    // Convert time to ticks
+    const tickEvents: { tick: number; midi: number; duration: number; velocity: number }[] = events.map(e => ({
+      tick: Math.round(e.time * (this.bpm / 60) * ticksPerBeat),
+      midi: e.midi,
+      duration: Math.round(e.duration * (this.bpm / 60) * ticksPerBeat),
+      velocity: e.velocity
+    }));
+    
+    // Build MIDI file
+    const midiData: number[] = [];
+    
+    // Helper to write variable-length quantity
+    const writeVLQ = (value: number): number[] => {
+      const bytes: number[] = [];
+      bytes.unshift(value & 0x7F);
+      value >>= 7;
+      while (value > 0) {
+        bytes.unshift((value & 0x7F) | 0x80);
+        value >>= 7;
+      }
+      return bytes;
+    };
+    
+    // Header chunk
+    midiData.push(0x4D, 0x54, 0x68, 0x64); // MThd
+    midiData.push(0, 0, 0, 6); // chunk length
+    midiData.push(0, 0); // format 0
+    midiData.push(0, 1); // 1 track
+    midiData.push((ticksPerBeat >> 8) & 0xFF, ticksPerBeat & 0xFF);
+    
+    // Track chunk
+    const trackData: number[] = [];
+    
+    // Tempo meta event
+    trackData.push(0); // delta time
+    trackData.push(0xFF, 0x51, 0x03); // tempo meta event
+    trackData.push((microsecondsPerBeat >> 16) & 0xFF);
+    trackData.push((microsecondsPerBeat >> 8) & 0xFF);
+    trackData.push(microsecondsPerBeat & 0xFF);
+    
+    // Sort events and create note on/off pairs
+    const noteEvents: { tick: number; type: 'on' | 'off'; midi: number; velocity: number }[] = [];
+    for (const e of tickEvents) {
+      noteEvents.push({ tick: e.tick, type: 'on', midi: e.midi, velocity: e.velocity });
+      noteEvents.push({ tick: e.tick + e.duration, type: 'off', midi: e.midi, velocity: 0 });
+    }
+    noteEvents.sort((a, b) => a.tick - b.tick || (a.type === 'off' ? -1 : 1));
+    
+    // Write note events
+    let lastTick = 0;
+    for (const e of noteEvents) {
+      const delta = e.tick - lastTick;
+      trackData.push(...writeVLQ(delta));
+      
+      if (e.type === 'on') {
+        trackData.push(0x90, e.midi, e.velocity); // Note on, channel 0
+      } else {
+        trackData.push(0x80, e.midi, 0); // Note off, channel 0
+      }
+      
+      lastTick = e.tick;
+    }
+    
+    // End of track
+    trackData.push(0, 0xFF, 0x2F, 0x00);
+    
+    // Track header
+    midiData.push(0x4D, 0x54, 0x72, 0x6B); // MTrk
+    const trackLength = trackData.length;
+    midiData.push((trackLength >> 24) & 0xFF);
+    midiData.push((trackLength >> 16) & 0xFF);
+    midiData.push((trackLength >> 8) & 0xFF);
+    midiData.push(trackLength & 0xFF);
+    midiData.push(...trackData);
+    
+    return new Blob([new Uint8Array(midiData)], { type: 'audio/midi' });
+  }
 }

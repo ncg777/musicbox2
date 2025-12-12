@@ -231,6 +231,7 @@ const savedParams = loadSavedParams();
 const engine = ref<MusicEngine | null>(null);
 const isPlaying = ref(false);
 const isLoading = ref(false);
+const isRendering = ref(false);
 const lambda = ref(savedParams?.lambda ?? 6); // Mean notes per bar
 const bpm = ref(savedParams?.bpm ?? 45); // Beats per minute
 const currentChord = ref('');
@@ -428,6 +429,52 @@ function importPresets() {
   input.click();
 }
 
+async function handleRenderWav() {
+  if (!engine.value || isRendering.value) return;
+  
+  const numHyperbars = parseInt(prompt('Number of hyperbars to render:', '4') || '4', 10);
+  if (isNaN(numHyperbars) || numHyperbars < 1) return;
+  
+  isRendering.value = true;
+  try {
+    const blob = await engine.value.renderWav(numHyperbars);
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `musicbox-${Date.now()}.wav`;
+    a.click();
+    URL.revokeObjectURL(url);
+  } catch (err) {
+    console.error('WAV render failed:', err);
+    alert('Failed to render WAV file');
+  } finally {
+    isRendering.value = false;
+  }
+}
+
+function handleRenderMidi() {
+  if (!engine.value || isRendering.value) return;
+  
+  const numHyperbars = parseInt(prompt('Number of hyperbars to render:', '4') || '4', 10);
+  if (isNaN(numHyperbars) || numHyperbars < 1) return;
+  
+  isRendering.value = true;
+  try {
+    const blob = engine.value.renderMidi(numHyperbars);
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `musicbox-${Date.now()}.mid`;
+    a.click();
+    URL.revokeObjectURL(url);
+  } catch (err) {
+    console.error('MIDI render failed:', err);
+    alert('Failed to render MIDI file');
+  } finally {
+    isRendering.value = false;
+  }
+}
+
 async function handlePlayClick() {
   if (!engine.value) return;
   
@@ -532,6 +579,24 @@ const noteNames = ['C', 'C♯', 'D', 'D♯', 'E', 'F', 'F♯', 'G', 'G♯', 'A',
         {{ isLoading ? '⏳' : isPlaying ? '⏸' : '▶' }}
       </button>
       <h1>🎵 musicbox2</h1>
+      <div class="render-buttons">
+        <button 
+          class="render-btn"
+          @click="handleRenderWav"
+          :disabled="isRendering"
+          title="Render to WAV file"
+        >
+          {{ isRendering ? '⏳' : '🎵' }} WAV
+        </button>
+        <button 
+          class="render-btn"
+          @click="handleRenderMidi"
+          :disabled="isRendering"
+          title="Render to MIDI file"
+        >
+          {{ isRendering ? '⏳' : '🎹' }} MIDI
+        </button>
+      </div>
     </header>
     
     <div class="note-indicator">
