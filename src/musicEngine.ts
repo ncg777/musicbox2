@@ -1516,29 +1516,68 @@ export class MusicEngine {
    */
   async renderWav(numHyperbars: number): Promise<Blob> {
     const events = this.generateNoteEvents(numHyperbars);
-    const totalDuration = numHyperbars * this.hyperbarSeconds + 3; // Extra 3 seconds for reverb tail
+    const totalDuration = numHyperbars * this.hyperbarSeconds + 5; // Extra 5 seconds for delay/reverb tail
     const sampleRate = 44100;
     
     // Create offline audio context
     const offlineCtx = new OfflineAudioContext(2, Math.ceil(totalDuration * sampleRate), sampleRate);
     
-    // Create master gain
+    // Create master gain (notes connect here)
     const masterGain = offlineCtx.createGain();
     masterGain.gain.value = 0.5;
-    masterGain.connect(offlineCtx.destination);
     
-    // Create simple reverb for offline
+    // Build the effects chain: masterGain -> delay -> reverb -> destination
+    let currentOutput: AudioNode = masterGain;
+    
+    // Add delay effect if enabled
+    const { enabled: delayEnabled, duration: delayDuration, feedback, mix } = this.synthParams.delay;
+    if (delayEnabled && mix > 0) {
+      const delaySeconds = musicalDurationToSeconds(delayDuration, this.bpm);
+      
+      const delayNode = offlineCtx.createDelay(5.0);
+      delayNode.delayTime.value = delaySeconds;
+      
+      const delayFeedbackGain = offlineCtx.createGain();
+      delayFeedbackGain.gain.value = Math.min(feedback, 0.95);
+      
+      const delayDryGain = offlineCtx.createGain();
+      delayDryGain.gain.value = 1 - mix;
+      
+      const delayWetGain = offlineCtx.createGain();
+      delayWetGain.gain.value = mix;
+      
+      const delayMixNode = offlineCtx.createGain();
+      delayMixNode.gain.value = 1.0;
+      
+      // Connect delay chain
+      currentOutput.connect(delayDryGain);
+      currentOutput.connect(delayNode);
+      delayNode.connect(delayFeedbackGain);
+      delayFeedbackGain.connect(delayNode);
+      delayNode.connect(delayWetGain);
+      delayDryGain.connect(delayMixNode);
+      delayWetGain.connect(delayMixNode);
+      
+      currentOutput = delayMixNode;
+    }
+    
+    // Add reverb
     const reverbNode = this.createOfflineReverb(offlineCtx);
     if (reverbNode) {
-      const dryGain = offlineCtx.createGain();
-      const wetGain = offlineCtx.createGain();
-      dryGain.gain.value = 0.7;
-      wetGain.gain.value = 0.3;
-      masterGain.connect(dryGain);
-      masterGain.connect(reverbNode);
-      reverbNode.connect(wetGain);
-      dryGain.connect(offlineCtx.destination);
-      wetGain.connect(offlineCtx.destination);
+      const reverbDryGain = offlineCtx.createGain();
+      const reverbWetGain = offlineCtx.createGain();
+      reverbDryGain.gain.value = 0.7;
+      reverbWetGain.gain.value = 0.3;
+      
+      currentOutput.connect(reverbDryGain);
+      currentOutput.connect(reverbNode);
+      reverbNode.connect(reverbWetGain);
+      
+      reverbDryGain.connect(offlineCtx.destination);
+      reverbWetGain.connect(offlineCtx.destination);
+    } else {
+      // No reverb, connect directly to destination
+      currentOutput.connect(offlineCtx.destination);
     }
     
     const { attack, decay, sustain, release } = this.synthParams.envelope;
