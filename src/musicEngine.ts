@@ -1667,7 +1667,8 @@ export class MusicEngine {
       const releaseStartTime = event.time + event.duration;
       const releaseEndTime = releaseStartTime + release;
       
-      const gain = 0.15 * (event.velocity / 127);
+      // Use same gain level as live playback (0.3), scaled by velocity
+      const gain = 0.3 * (event.velocity / 127);
       envelopeGain.gain.linearRampToValueAtTime(gain, peakTime);
       envelopeGain.gain.linearRampToValueAtTime(gain * sustain, decayEndTime);
       envelopeGain.gain.setValueAtTime(gain * sustain, releaseStartTime);
