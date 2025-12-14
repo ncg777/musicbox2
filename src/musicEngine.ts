@@ -1551,7 +1551,7 @@ export class MusicEngine {
     let currentOutput: AudioNode = masterGain;
     
     // Add delay effect if enabled
-    const { enabled: delayEnabled, duration: delayDuration, feedback, mix } = this.synthParams.delay;
+    const { enabled: delayEnabled, duration: delayDuration, feedback, mix, filterType, filterFrequency, filterResonance, filterOrder } = this.synthParams.delay;
     if (delayEnabled && mix > 0) {
       const delaySeconds = musicalDurationToSeconds(delayDuration, this.bpm);
       
@@ -1570,12 +1570,39 @@ export class MusicEngine {
       const delayMixNode = offlineCtx.createGain();
       delayMixNode.gain.value = 1.0;
       
-      // Connect delay chain
+      const delayInputGain = offlineCtx.createGain();
+      delayInputGain.gain.value = 1.0;
+      
+      // Create filter chain for delay feedback
+      const numFilters = filterOrder / 6;
+      const delayFilters: BiquadFilterNode[] = [];
+      for (let i = 0; i < numFilters; i++) {
+        const filter = offlineCtx.createBiquadFilter();
+        filter.type = filterType;
+        filter.frequency.value = filterFrequency;
+        filter.Q.value = filterResonance;
+        delayFilters.push(filter);
+      }
+      
+      // Connect delay chain with filters
       currentOutput.connect(delayDryGain);
-      currentOutput.connect(delayNode);
-      delayNode.connect(delayFeedbackGain);
-      delayFeedbackGain.connect(delayNode);
-      delayNode.connect(delayWetGain);
+      currentOutput.connect(delayInputGain);
+      delayInputGain.connect(delayNode);
+      
+      if (delayFilters.length > 0) {
+        delayNode.connect(delayFilters[0]);
+        for (let i = 0; i < delayFilters.length - 1; i++) {
+          delayFilters[i].connect(delayFilters[i + 1]);
+        }
+        const lastFilter = delayFilters[delayFilters.length - 1];
+        lastFilter.connect(delayFeedbackGain);
+        lastFilter.connect(delayWetGain);
+      } else {
+        delayNode.connect(delayFeedbackGain);
+        delayNode.connect(delayWetGain);
+      }
+      
+      delayFeedbackGain.connect(delayInputGain);
       delayDryGain.connect(delayMixNode);
       delayWetGain.connect(delayMixNode);
       
