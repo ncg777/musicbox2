@@ -1602,12 +1602,35 @@ export class MusicEngine {
     }
     
     const { attack, decay, sustain, release } = this.synthParams.envelope;
+    const { rate: vibratoRate, depth: vibratoDepth } = this.synthParams.vibrato;
+    const { rate: tremoloRate, depth: tremoloDepth } = this.synthParams.tremolo;
     
     // Schedule all notes
     for (const event of events) {
       const oscillator = offlineCtx.createOscillator();
       oscillator.type = 'sine';
       oscillator.frequency.setValueAtTime(event.frequency, event.time);
+      
+      // Create vibrato (frequency modulation) using LFO
+      const vibratoLFO = offlineCtx.createOscillator();
+      const vibratoGain = offlineCtx.createGain();
+      vibratoLFO.type = 'sine';
+      vibratoLFO.frequency.setValueAtTime(vibratoRate, event.time);
+      // Vibrato depth is in semitones, convert to frequency deviation
+      vibratoGain.gain.setValueAtTime(event.frequency * vibratoDepth, event.time);
+      vibratoLFO.connect(vibratoGain);
+      vibratoGain.connect(oscillator.frequency);
+      
+      // Create tremolo (amplitude modulation) using LFO
+      const tremoloLFO = offlineCtx.createOscillator();
+      const tremoloGain = offlineCtx.createGain();
+      const tremoloDepthNode = offlineCtx.createGain();
+      tremoloLFO.type = 'sine';
+      tremoloLFO.frequency.setValueAtTime(tremoloRate, event.time);
+      // Tremolo oscillates between (1 - depth) and 1
+      tremoloGain.gain.setValueAtTime(1 - tremoloDepth / 2, event.time);
+      tremoloDepthNode.gain.setValueAtTime(tremoloDepth / 2, event.time);
+      tremoloLFO.connect(tremoloDepthNode);
       
       const envelopeGain = offlineCtx.createGain();
       envelopeGain.gain.setValueAtTime(0, event.time);
@@ -1623,11 +1646,21 @@ export class MusicEngine {
       envelopeGain.gain.setValueAtTime(gain * sustain, releaseStartTime);
       envelopeGain.gain.linearRampToValueAtTime(0, releaseEndTime);
       
+      // Connect chain: oscillator -> envelope -> tremolo mix -> master
       oscillator.connect(envelopeGain);
-      envelopeGain.connect(masterGain);
+      envelopeGain.connect(tremoloGain);
+      tremoloDepthNode.connect(tremoloGain.gain);
+      tremoloGain.connect(masterGain);
       
+      // Start all oscillators
       oscillator.start(event.time);
+      vibratoLFO.start(event.time);
+      tremoloLFO.start(event.time);
+      
+      // Stop all oscillators
       oscillator.stop(releaseEndTime + 0.1);
+      vibratoLFO.stop(releaseEndTime + 0.1);
+      tremoloLFO.stop(releaseEndTime + 0.1);
     }
     
     // Render
