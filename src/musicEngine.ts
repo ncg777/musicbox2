@@ -366,6 +366,9 @@ export class MusicEngine {
   private arpeggioStepsRemaining: number = 0;  // Steps remaining in current direction
   private nextArpeggioTime: number = 0;  // Next scheduled arpeggio note time
   private arpeggioSequence: { pitch: number; octaveOffset: number }[] = [];  // Permuted arpeggio sequence with octave offsets
+  private arpeggioRateMultiplier: number = 1;  // Rate multiplier: 0.5 = double speed, 1 = normal, 2 = half speed
+  private arpeggioLastRateChangeBar: number = -2;  // Last bar index when rate was changed
+  private readonly ARPEGGIO_RATE_OPTIONS: number[] = [0.5, 1, 1, 2];  // Possible rate multipliers (weighted towards normal)
   
   // Callbacks
   onChordChange?: (chord: string) => void;
@@ -387,6 +390,8 @@ export class MusicEngine {
     }
     this.arpeggioBaseOctave = Math.floor((OCTAVE_MIN + OCTAVE_MAX) / 2);
     this.arpeggioStepsRemaining = 0;
+    this.arpeggioRateMultiplier = 1;
+    this.arpeggioLastRateChangeBar = -2;
     this.setupMediaSession();
   }
 
@@ -1176,12 +1181,19 @@ export class MusicEngine {
       }
     }
 
-    // Schedule arpeggio notes independently on regular 8th note intervals
-    const eighthNoteSeconds = this.sixteenthSeconds * 2;  // 8th note = 2 x 16th
+    // Schedule arpeggio notes independently on regular intervals (rate changes every 2 bars)
+    // Check if we should change the arpeggio rate (every 2 bars)
+    if (this.currentBarIndex >= this.arpeggioLastRateChangeBar + 2) {
+      this.arpeggioLastRateChangeBar = this.currentBarIndex;
+      this.arpeggioRateMultiplier = this.ARPEGGIO_RATE_OPTIONS[
+        Math.floor(Math.random() * this.ARPEGGIO_RATE_OPTIONS.length)
+      ];
+    }
+    const arpeggioIntervalSeconds = this.sixteenthSeconds * 2 * this.arpeggioRateMultiplier;  // 8th note base, scaled by rate
     while (this.nextArpeggioTime <= currentTime + lookAhead) {
       const noteTime = Math.max(this.nextArpeggioTime, currentTime + 0.02);
       this.triggerArpeggioNote(noteTime);
-      this.nextArpeggioTime += eighthNoteSeconds;
+      this.nextArpeggioTime += arpeggioIntervalSeconds;
     }
 
     // Schedule next check
@@ -1410,7 +1422,9 @@ export class MusicEngine {
     }
     
     let currentTime = 0;
-    const eighthNoteSeconds = this.sixteenthSeconds * 2;
+    let arpeggioRateMultiplier = 1;
+    let arpeggioLastRateChangeBar = -2;
+    let arpeggioIntervalSeconds = this.sixteenthSeconds * 2;
     let nextArpTime = 0;
     
     for (let hyperbar = 0; hyperbar < numHyperbars; hyperbar++) {
@@ -1422,6 +1436,17 @@ export class MusicEngine {
         // Update chord if bar changed
         if (barIndex !== this.currentBarIndex) {
           this.currentBarIndex = barIndex;
+          
+          // Change arpeggio rate every 2 bars
+          const globalBarIndex = hyperbar * BARS_PER_HYPERBAR + barIndex;
+          if (globalBarIndex >= arpeggioLastRateChangeBar + 2) {
+            arpeggioLastRateChangeBar = globalBarIndex;
+            arpeggioRateMultiplier = this.ARPEGGIO_RATE_OPTIONS[
+              Math.floor(Math.random() * this.ARPEGGIO_RATE_OPTIONS.length)
+            ];
+            arpeggioIntervalSeconds = this.sixteenthSeconds * 2 * arpeggioRateMultiplier;
+          }
+          
           if (barIndex >= 0 && barIndex < this.currentHyperbarChords.length) {
             const chord = this.currentHyperbarChords[barIndex];
             this.activePitchClasses = chord.asSequence();
@@ -1509,7 +1534,7 @@ export class MusicEngine {
             const duration = this.sixteenthSeconds * 0.9;
             
             events.push({ time: nextArpTime, frequency, duration, midi, velocity: 60 });
-            nextArpTime += eighthNoteSeconds;
+            nextArpTime += arpeggioIntervalSeconds;
           }
         }
       }
