@@ -666,8 +666,10 @@ export class MusicEngine {
       // Generate a new permuted arpeggio sequence
       this.generateArpeggioSequence();
       
-      // Reset arpeggio index to start of new sequence
-      this.arpeggioIndex = 0;
+      // Start arpeggio at a random position in the new sequence
+      this.arpeggioIndex = this.arpeggioSequence.length > 0 
+        ? Math.floor(Math.random() * this.arpeggioSequence.length) 
+        : 0;
       
       if (this.onChordChange) {
         this.onChordChange(chord.toString());
