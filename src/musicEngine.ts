@@ -1098,11 +1098,41 @@ export class MusicEngine {
       return;
     }
 
+    // 80% probability of playing a note (20% chance of rest)
+    if (Math.random() > 0.8) {
+      // Advance the arpeggio index even when skipping, to maintain musical continuity
+      this.advanceArpeggioIndex();
+      return;
+    }
+
     // Get current note from permuted arpeggio sequence
     const note = this.arpeggioSequence[this.arpeggioIndex];
     const pitchClass = note.pitch;
     const octave = this.arpeggioBaseOctave + note.octaveOffset;
     
+    // Advance the arpeggio index for the next note
+    this.advanceArpeggioIndex();
+    
+    // Clamp final octave to valid range
+    const clampedOctave = Math.max(OCTAVE_MIN, Math.min(OCTAVE_MAX, octave));
+    const midi = clampedOctave * 12 + pitchClass;
+    const frequency = midiToFreq(midi);
+    // Arpeggio notes are shorter and more consistent
+    const duration = this.sixteenthSeconds * 0.9;
+
+    console.log('Triggering arpeggio:', { pitchClass, octave: clampedOctave, frequency: frequency.toFixed(1), whenTime: whenTime.toFixed(2) });
+    
+    this.triggerNote(frequency, whenTime, duration);
+    
+    if (this.onNoteTriggered) {
+      this.onNoteTriggered(pitchClass);
+    }
+  }
+
+  /**
+   * Advance the arpeggio index to the next note, handling direction changes and boundary wrapping.
+   */
+  private advanceArpeggioIndex(): void {
     // Check if we need to pick a new direction and step count
     if (this.arpeggioStepsRemaining <= 0) {
       // Pick a random number of steps (2 to 6) and a random direction
@@ -1134,21 +1164,6 @@ export class MusicEngine {
       if (this.arpeggioBaseOctave > OCTAVE_MIN) {
         this.arpeggioBaseOctave--;
       }
-    }
-    
-    // Clamp final octave to valid range
-    const clampedOctave = Math.max(OCTAVE_MIN, Math.min(OCTAVE_MAX, octave));
-    const midi = clampedOctave * 12 + pitchClass;
-    const frequency = midiToFreq(midi);
-    // Arpeggio notes are shorter and more consistent
-    const duration = this.sixteenthSeconds * 0.9;
-
-    console.log('Triggering arpeggio:', { pitchClass, octave: clampedOctave, frequency: frequency.toFixed(1), whenTime: whenTime.toFixed(2) });
-    
-    this.triggerNote(frequency, whenTime, duration);
-    
-    if (this.onNoteTriggered) {
-      this.onNoteTriggered(pitchClass);
     }
   }
 
