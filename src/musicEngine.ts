@@ -367,7 +367,7 @@ export class MusicEngine {
   private nextArpeggioTime: number = 0;  // Next scheduled arpeggio note time
   private arpeggioSequence: { pitch: number; octaveOffset: number }[] = [];  // Permuted arpeggio sequence with octave offsets
   private arpeggioRateMultiplier: number = 1;  // Rate multiplier: 0.5 = double speed, 1 = normal, 2 = half speed
-  private arpeggioLastRateChangeBar: number = -2;  // Last bar index when rate was changed
+  private arpeggioLastRateChangeBeat: number = -2;  // Last beat index when rate was changed
   private readonly ARPEGGIO_RATE_OPTIONS: number[] = [0.5, 1, 1, 2];  // Possible rate multipliers (weighted towards normal)
   
   // Callbacks
@@ -391,7 +391,7 @@ export class MusicEngine {
     this.arpeggioBaseOctave = Math.floor((OCTAVE_MIN + OCTAVE_MAX) / 2);
     this.arpeggioStepsRemaining = 0;
     this.arpeggioRateMultiplier = 1;
-    this.arpeggioLastRateChangeBar = -2;
+    this.arpeggioLastRateChangeBeat = -2;
     this.setupMediaSession();
   }
 
@@ -1196,19 +1196,21 @@ export class MusicEngine {
       }
     }
 
-    // Schedule arpeggio notes independently on regular intervals (rate changes every 2 bars)
-    // Check if we should change the arpeggio rate (every 2 bars)
-    if (this.currentBarIndex >= this.arpeggioLastRateChangeBar + 2) {
-      this.arpeggioLastRateChangeBar = this.currentBarIndex;
-      this.arpeggioRateMultiplier = this.ARPEGGIO_RATE_OPTIONS[
-        Math.floor(Math.random() * this.ARPEGGIO_RATE_OPTIONS.length)
-      ];
-    }
-    const arpeggioIntervalSeconds = this.sixteenthSeconds * 2 * this.arpeggioRateMultiplier;  // 8th note base, scaled by rate
+    // Schedule arpeggio notes independently on regular intervals (rate changes every 2 beats)
     while (this.nextArpeggioTime <= currentTime + lookAhead) {
+      // Check if we should change the arpeggio rate (every 2 beats)
+      // Calculate current beat from arpeggio time (1 beat = 4 sixteenths)
+      const currentBeat = Math.floor((this.nextArpeggioTime - this.hyperbarStartTime) / (this.sixteenthSeconds * 4));
+      if (currentBeat >= this.arpeggioLastRateChangeBeat + 2) {
+        this.arpeggioLastRateChangeBeat = currentBeat;
+        this.arpeggioRateMultiplier = this.ARPEGGIO_RATE_OPTIONS[
+          Math.floor(Math.random() * this.ARPEGGIO_RATE_OPTIONS.length)
+        ];
+      }
+      
       const noteTime = Math.max(this.nextArpeggioTime, currentTime + 0.02);
       this.triggerArpeggioNote(noteTime);
-      this.nextArpeggioTime += arpeggioIntervalSeconds;
+      this.nextArpeggioTime += this.sixteenthSeconds * 2 * this.arpeggioRateMultiplier;
     }
 
     // Schedule next check
@@ -1438,7 +1440,7 @@ export class MusicEngine {
     
     let currentTime = 0;
     let arpeggioRateMultiplier = 1;
-    let arpeggioLastRateChangeBar = -2;
+    let arpeggioLastRateChangeBeat = -2;
     let arpeggioIntervalSeconds = this.sixteenthSeconds * 2;
     let nextArpTime = 0;
     
@@ -1451,16 +1453,6 @@ export class MusicEngine {
         // Update chord if bar changed
         if (barIndex !== this.currentBarIndex) {
           this.currentBarIndex = barIndex;
-          
-          // Change arpeggio rate every 2 bars
-          const globalBarIndex = hyperbar * BARS_PER_HYPERBAR + barIndex;
-          if (globalBarIndex >= arpeggioLastRateChangeBar + 2) {
-            arpeggioLastRateChangeBar = globalBarIndex;
-            arpeggioRateMultiplier = this.ARPEGGIO_RATE_OPTIONS[
-              Math.floor(Math.random() * this.ARPEGGIO_RATE_OPTIONS.length)
-            ];
-            arpeggioIntervalSeconds = this.sixteenthSeconds * 2 * arpeggioRateMultiplier;
-          }
           
           if (barIndex >= 0 && barIndex < this.currentHyperbarChords.length) {
             const chord = this.currentHyperbarChords[barIndex];
@@ -1517,6 +1509,16 @@ export class MusicEngine {
           
           // Arpeggio notes during this time window
           while (nextArpTime <= noteTime + this.sixteenthSeconds && this.arpeggioSequence.length > 0) {
+            // Change arpeggio rate every 2 beats (1 beat = 4 sixteenths)
+            const currentBeat = Math.floor(nextArpTime / (this.sixteenthSeconds * 4));
+            if (currentBeat >= arpeggioLastRateChangeBeat + 2) {
+              arpeggioLastRateChangeBeat = currentBeat;
+              arpeggioRateMultiplier = this.ARPEGGIO_RATE_OPTIONS[
+                Math.floor(Math.random() * this.ARPEGGIO_RATE_OPTIONS.length)
+              ];
+              arpeggioIntervalSeconds = this.sixteenthSeconds * 2 * arpeggioRateMultiplier;
+            }
+            
             const note = this.arpeggioSequence[this.arpeggioIndex];
             const pitchClass = note.pitch;
             const octave = this.arpeggioBaseOctave + note.octaveOffset;
