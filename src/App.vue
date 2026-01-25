@@ -44,9 +44,9 @@ const FACTORY_PRESETS: Preset[] = [
     isFactory: true,
     params: {
       bpm: 45,
-      hawkesBaseRate: 2.0,
-      hawkesExcitation: 0.8,
-      hawkesDecay: 3.0,
+      hawkesBaseRate: 8.0,
+      hawkesExcitation: 3.2,
+      hawkesDecay: 12.0,
       lambda: 6,
       attack: DEFAULT_SYNTH_PARAMS.envelope.attack,
       decay: DEFAULT_SYNTH_PARAMS.envelope.decay,
@@ -72,9 +72,9 @@ const FACTORY_PRESETS: Preset[] = [
     isFactory: true,
     params: {
       bpm: 30,
-      hawkesBaseRate: 1.0,
-      hawkesExcitation: 0.5,
-      hawkesDecay: 2.0,
+      hawkesBaseRate: 4.0,
+      hawkesExcitation: 2.0,
+      hawkesDecay: 8.0,
       lambda: 3,
       attack: 0.8,
       decay: 0.5,
@@ -100,9 +100,9 @@ const FACTORY_PRESETS: Preset[] = [
     isFactory: true,
     params: {
       bpm: 90,
-      hawkesBaseRate: 3.0,
-      hawkesExcitation: 1.2,
-      hawkesDecay: 5.0,
+      hawkesBaseRate: 12.0,
+      hawkesExcitation: 4.8,
+      hawkesDecay: 20.0,
       lambda: 12,
       attack: 0.01,
       decay: 0.15,
@@ -128,9 +128,9 @@ const FACTORY_PRESETS: Preset[] = [
     isFactory: true,
     params: {
       bpm: 20,
-      hawkesBaseRate: 0.8,
-      hawkesExcitation: 0.3,
-      hawkesDecay: 1.5,
+      hawkesBaseRate: 3.2,
+      hawkesExcitation: 1.2,
+      hawkesDecay: 6.0,
       lambda: 2,
       attack: 1.5,
       decay: 1.0,
@@ -255,9 +255,9 @@ const isLoading = ref(false);
 const isRendering = ref(false);
 const lambda = ref(savedParams?.lambda ?? 6); // Mean notes per bar
 const bpm = ref(savedParams?.bpm ?? 45); // Beats per minute
-const hawkesBaseRate = ref(savedParams?.hawkesBaseRate ?? 2.0); // Hawkes base intensity
-const hawkesExcitation = ref(savedParams?.hawkesExcitation ?? 0.8); // Hawkes excitation jump
-const hawkesDecay = ref(savedParams?.hawkesDecay ?? 3.0); // Hawkes decay rate
+const hawkesBaseRate = ref(savedParams?.hawkesBaseRate ?? 8.0); // Hawkes base intensity (per bar)
+const hawkesExcitation = ref(savedParams?.hawkesExcitation ?? 3.2); // Hawkes excitation jump
+const hawkesDecay = ref(savedParams?.hawkesDecay ?? 12.0); // Hawkes decay rate (per bar)
 const currentChord = ref('');
 const activeNotes = ref<Set<number>>(new Set());
 
@@ -325,9 +325,9 @@ const filterOrderOptions: DelayFilterOrder[] = [6, 12, 24];
 function applyPreset(preset: Preset) {
   const p = preset.params;
   bpm.value = p.bpm;
-  hawkesBaseRate.value = p.hawkesBaseRate ?? 2.0;
-  hawkesExcitation.value = p.hawkesExcitation ?? 0.8;
-  hawkesDecay.value = p.hawkesDecay ?? 3.0;
+  hawkesBaseRate.value = p.hawkesBaseRate ?? 8.0;
+  hawkesExcitation.value = p.hawkesExcitation ?? 3.2;
+  hawkesDecay.value = p.hawkesDecay ?? 12.0;
   lambda.value = p.lambda;
   attack.value = p.attack;
   decay.value = p.decay;
@@ -718,13 +718,13 @@ const noteNames = ['C', 'C♯', 'D', 'D♯', 'E', 'F', 'F♯', 'G', 'G♯', 'A',
               <input 
                 type="range" 
                 id="hawkesBaseRate"
-                min="0.1" 
-                max="10" 
-                step="0.1"
+                min="0.5" 
+                max="40" 
+                step="0.5"
                 v-model.number="hawkesBaseRate"
                 @input="updateEngineParams"
               />
-              <span class="value-display">{{ hawkesBaseRate.toFixed(1) }}/beat</span>
+              <span class="value-display">{{ hawkesBaseRate.toFixed(1) }}/bar</span>
             </div>
           </div>
           <div class="slider-container">
@@ -734,7 +734,7 @@ const noteNames = ['C', 'C♯', 'D', 'D♯', 'E', 'F', 'F♯', 'G', 'G♯', 'A',
                 type="range" 
                 id="hawkesExcitation"
                 min="0" 
-                max="5" 
+                max="20" 
                 step="0.1"
                 v-model.number="hawkesExcitation"
                 @input="updateEngineParams"
@@ -748,13 +748,13 @@ const noteNames = ['C', 'C♯', 'D', 'D♯', 'E', 'F', 'F♯', 'G', 'G♯', 'A',
               <input 
                 type="range" 
                 id="hawkesDecay"
-                min="0.1" 
-                max="20" 
-                step="0.1"
+                min="0.5" 
+                max="80" 
+                step="0.5"
                 v-model.number="hawkesDecay"
                 @input="updateEngineParams"
               />
-              <span class="value-display">{{ hawkesDecay.toFixed(1) }}/beat</span>
+              <span class="value-display">{{ hawkesDecay.toFixed(1) }}/bar</span>
             </div>
           </div>
           <div class="slider-container">

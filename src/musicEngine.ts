@@ -74,11 +74,12 @@ const MAX_VOICES = 64;
 const OCTAVE_MIN = 4;
 const OCTAVE_MAX = 7;
 const BARS_PER_HYPERBAR = 8;
+const BEATS_PER_BAR = 4;
 
-// Hawkes process parameters (beat-relative, scales with BPM)
-const HAWKES_BASE_RATE = 2.0;  // Base intensity (notes per beat)
-const HAWKES_EXCITATION = 0.8;  // Jump in intensity after each event
-const HAWKES_DECAY = 3.0;  // Decay rate of excitation (per beat)
+// Hawkes process parameters (bar-relative, scales with BPM)
+const HAWKES_BASE_RATE = 8.0;  // Base intensity (notes per bar)
+const HAWKES_EXCITATION = 3.2;  // Jump in intensity after each event
+const HAWKES_DECAY = 12.0;  // Decay rate of excitation (per bar)
 
 // User-configurable parameters with defaults
 export interface EnvelopeParams {
@@ -399,7 +400,7 @@ export class MusicEngine {
   }
 
   setHawkesBaseRate(rate: number): void {
-    this.hawkesBaseRate = Math.max(0.1, Math.min(10, rate)); // Clamp to reasonable range
+    this.hawkesBaseRate = Math.max(0.5, Math.min(40, rate)); // Clamp to reasonable range (notes per bar)
   }
 
   getHawkesBaseRate(): number {
@@ -407,7 +408,7 @@ export class MusicEngine {
   }
 
   setHawkesExcitation(excitation: number): void {
-    this.hawkesExcitation = Math.max(0, Math.min(5, excitation)); // Clamp to reasonable range
+    this.hawkesExcitation = Math.max(0, Math.min(20, excitation)); // Clamp to reasonable range
   }
 
   getHawkesExcitation(): number {
@@ -415,7 +416,7 @@ export class MusicEngine {
   }
 
   setHawkesDecay(decay: number): void {
-    this.hawkesDecay = Math.max(0.1, Math.min(20, decay)); // Clamp to reasonable range
+    this.hawkesDecay = Math.max(0.5, Math.min(80, decay)); // Clamp to reasonable range (per bar)
   }
 
   getHawkesDecay(): number {
@@ -627,28 +628,29 @@ export class MusicEngine {
   /**
    * Calculate the current Hawkes process intensity.
    * Combines base rate with excitation from recent events and rhythm proximity.
-   * All Hawkes parameters are beat-relative and scale with BPM.
+   * All Hawkes parameters are bar-relative and scale with BPM.
    */
   private calculateHawkesIntensity(currentTime: number): number {
-    // Convert beat-relative parameters to time-relative
-    const beatsPerSecond = this.bpm / 60;
-    const baseRatePerSecond = this.hawkesBaseRate * beatsPerSecond;
-    const decayPerSecond = this.hawkesDecay * beatsPerSecond;
+    // Convert bar-relative parameters to time-relative
+    const barsPerSecond = this.bpm / 60 / BEATS_PER_BAR;
+    const baseRatePerSecond = this.hawkesBaseRate * barsPerSecond;
+    const decayPerSecond = this.hawkesDecay * barsPerSecond;
     
-    // Clean up old events (older than 4 beats)
-    const cutoffTime = currentTime - (4 / beatsPerSecond);
+    // Clean up old events (older than 1 bar)
+    const cutoffTime = currentTime - (1 / barsPerSecond);
     this.hawkesEventTimes = this.hawkesEventTimes.filter(t => t > cutoffTime);
     
     // Calculate excitation from recent events
     let excitation = 0;
     for (const eventTime of this.hawkesEventTimes) {
       const timeSinceEvent = currentTime - eventTime;
-      excitation += this.hawkesExcitation * beatsPerSecond * Math.exp(-decayPerSecond * timeSinceEvent);
+      excitation += this.hawkesExcitation * barsPerSecond * Math.exp(-decayPerSecond * timeSinceEvent);
     }
     
     // Calculate rhythm proximity boost (also scales with tempo)
     // Increase intensity when approaching rhythm onsets from the pattern (only future onsets)
     let rhythmBoost = 0;
+    const beatsPerSecond = this.bpm / 60;
     for (const onsetTime of this.currentRhythmOnsets) {
       const distanceToOnset = onsetTime - currentTime;  // Positive = onset is in future
       // Only boost for upcoming onsets (within 1/8 note ahead)
@@ -665,10 +667,10 @@ export class MusicEngine {
    */
   private sampleNextHawkesEventTime(currentTime: number): number {
     // Use thinning (Ogata's algorithm) to sample from non-homogeneous Poisson process
-    const beatsPerSecond = this.bpm / 60;
+    const barsPerSecond = this.bpm / 60 / BEATS_PER_BAR;
     let t = currentTime;
     // Upper bound on intensity (converted to per-second)
-    const maxIntensity = (this.hawkesBaseRate + this.hawkesExcitation * this.hawkesEventTimes.length + 6.0) * beatsPerSecond;
+    const maxIntensity = (this.hawkesBaseRate + this.hawkesExcitation * this.hawkesEventTimes.length + 24.0) * barsPerSecond;
     
     while (true) {
       // Sample from homogeneous Poisson with rate = maxIntensity
@@ -685,9 +687,9 @@ export class MusicEngine {
       }
       // Otherwise reject and continue sampling
       
-      // Safety: don't look more than 4 beats ahead
-      if (t > currentTime + (4 / beatsPerSecond)) {
-        return currentTime + (0.5 / beatsPerSecond) + Math.random() * (0.5 / beatsPerSecond);
+      // Safety: don't look more than 1 bar ahead
+      if (t > currentTime + (1 / barsPerSecond)) {
+        return currentTime + (0.5 / barsPerSecond) + Math.random() * (0.5 / barsPerSecond);
       }
     }
   }
