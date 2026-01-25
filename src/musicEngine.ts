@@ -74,7 +74,11 @@ const MAX_VOICES = 64;
 const OCTAVE_MIN = 4;
 const OCTAVE_MAX = 7;
 const BARS_PER_HYPERBAR = 8;
-const NUM_VOICES = 2;  // Florid counterpoint with 2 voices (strum, florid) - arpeggio is independent
+
+// Hawkes process parameters (beat-relative, scales with BPM)
+const HAWKES_BASE_RATE = 2.0;  // Base intensity (notes per beat)
+const HAWKES_EXCITATION = 0.8;  // Jump in intensity after each event
+const HAWKES_DECAY = 3.0;  // Decay rate of excitation (per beat)
 
 // User-configurable parameters with defaults
 export interface EnvelopeParams {
@@ -200,43 +204,6 @@ function midiToFreq(midi: number): number {
   return 440 * Math.pow(2, (midi - 69) / 12);
 }
 
-/**
- * Compute GCD using Euclidean algorithm
- */
-function gcd(a: number, b: number): number {
-  while (b !== 0) {
-    const t = b;
-    b = a % b;
-    a = t;
-  }
-  return a;
-}
-
-/**
- * Get all numbers coprime with n (for permutation generation)
- */
-function getCoprimes(n: number): number[] {
-  const coprimes: number[] = [];
-  for (let k = 1; k < n; k++) {
-    if (gcd(k, n) === 1) {
-      coprimes.push(k);
-    }
-  }
-  return coprimes.length > 0 ? coprimes : [1];  // Fallback to 1 if n=1
-}
-
-/**
- * Generate a permutation of indices 0..n-1 using multiplier k mod n
- * Formula: permutation[i] = (i * k) % n
- */
-function generateMultiplierPermutation(n: number, k: number): number[] {
-  const perm: number[] = [];
-  for (let i = 0; i < n; i++) {
-    perm.push((i * k) % n);
-  }
-  return perm;
-}
-
 interface Voice {
   oscillator: OscillatorNode | null;
   gainNode: GainNode | null;
@@ -340,35 +307,26 @@ export class MusicEngine {
   // Timing parameters
   private bpm: number = DEFAULT_BPM;
   
+  // Hawkes process parameters (user-configurable)
+  private hawkesBaseRate: number = HAWKES_BASE_RATE;
+  private hawkesExcitation: number = HAWKES_EXCITATION;
+  private hawkesDecay: number = HAWKES_DECAY;
+  
   // Hyperbar and rhythm scheduling
   private hyperbarStartTime: number = 0;
   private currentHyperbarRhythms: string[] = [];  // 8 rhythms for current hyperbar
   private currentHyperbarChords: Pcs12[] = [];  // 8 chords for current hyperbar (synced with rhythms)
-  private scheduledNoteIndex: number = 0;  // Index into scheduled notes for current hyperbar
-  private scheduledNotes: { time: number; barIndex: number; voiceIndex: number }[] = [];  // Pre-scheduled note times with voice
   
-  // Octave tracking for smooth evolution (one per voice for counterpoint)
-  private currentOctaves: number[] = [];
+  // Hawkes process state
+  private hawkesEventTimes: number[] = [];  // Recent event times for calculating excitation
+  private nextHawkesCheckTime: number = 0;  // Next time to check for Hawkes event
+  private currentRhythmOnsets: number[] = [];  // Current bar's rhythm onsets as absolute times
+  
+  // Octave tracking for smooth evolution
+  private currentOctave: number = 5;
   
   // Current bar tracking for chord changes
   private currentBarIndex: number = 0;
-  
-  // Strumming pattern state for voice 0
-  private strumPatternIndex: number = 0;  // Current position in strum pattern
-  private currentStrumPattern: number[] = [];  // Current strum pattern (indices into chord)
-  private strumTriggerCounter: number = 0;  // Counter for slowing down strum triggers
-  private readonly STRUM_DIVISOR: number = 2;  // Play strum note every Nth trigger (2 = half speed)
-  
-  // Arpeggio pattern state for voice 2 (independent regular meter)
-  private arpeggioIndex: number = 0;  // Current position in arpeggio
-  private arpeggioDirection: number = 1;  // 1 for up, -1 for down
-  private arpeggioBaseOctave: number = 5;  // Base octave for arpeggio voice
-  private arpeggioStepsRemaining: number = 0;  // Steps remaining in current direction
-  private nextArpeggioTime: number = 0;  // Next scheduled arpeggio note time
-  private arpeggioSequence: { pitch: number; octaveOffset: number }[] = [];  // Permuted arpeggio sequence with octave offsets
-  private arpeggioRateMultiplier: number = 1;  // Rate multiplier: 0.5 = double speed, 1 = normal, 2 = half speed
-  private arpeggioLastRateChangeBeat: number = -2;  // Last beat index when rate was changed
-  private readonly ARPEGGIO_RATE_OPTIONS: number[] = [0.5, 1, 1, 2];  // Possible rate multipliers (weighted towards normal)
   
   // Callbacks
   onChordChange?: (chord: string) => void;
@@ -381,17 +339,8 @@ export class MusicEngine {
     this.currentScaleRotation = Math.floor(Math.random() * 12);
     this.currentScale = getBebopScale(this.currentScaleRotation);
     this.currentKey = getKeyFromRotation(this.currentScaleRotation);
-    // Initialize octaves for each voice at different starting positions
-    this.currentOctaves = [];
-    for (let i = 0; i < NUM_VOICES; i++) {
-      // Spread voices across the octave range
-      const baseOctave = Math.floor((OCTAVE_MIN + OCTAVE_MAX) / 2);
-      this.currentOctaves.push(baseOctave + (i === 0 ? 0 : 1));  // Voice 0 lower, Voice 1 higher
-    }
-    this.arpeggioBaseOctave = Math.floor((OCTAVE_MIN + OCTAVE_MAX) / 2);
-    this.arpeggioStepsRemaining = 0;
-    this.arpeggioRateMultiplier = 1;
-    this.arpeggioLastRateChangeBeat = -2;
+    // Initialize octave in the middle of the range
+    this.currentOctave = Math.floor((OCTAVE_MIN + OCTAVE_MAX) / 2);
     this.setupMediaSession();
   }
 
@@ -447,6 +396,30 @@ export class MusicEngine {
 
   getBpm(): number {
     return this.bpm;
+  }
+
+  setHawkesBaseRate(rate: number): void {
+    this.hawkesBaseRate = Math.max(0.1, Math.min(10, rate)); // Clamp to reasonable range
+  }
+
+  getHawkesBaseRate(): number {
+    return this.hawkesBaseRate;
+  }
+
+  setHawkesExcitation(excitation: number): void {
+    this.hawkesExcitation = Math.max(0, Math.min(5, excitation)); // Clamp to reasonable range
+  }
+
+  getHawkesExcitation(): number {
+    return this.hawkesExcitation;
+  }
+
+  setHawkesDecay(decay: number): void {
+    this.hawkesDecay = Math.max(0.1, Math.min(20, decay)); // Clamp to reasonable range
+  }
+
+  getHawkesDecay(): number {
+    return this.hawkesDecay;
   }
 
   setSynthParams(params: Partial<SynthParams>): void {
@@ -630,51 +603,20 @@ export class MusicEngine {
   }
 
   /**
-   * Pre-schedule all note times for the current hyperbar (with 2-voice counterpoint)
+   * Update rhythm onsets for the current bar (used by Hawkes process)
    */
-  private scheduleHyperbarNotes(startTime: number): void {
-    this.scheduledNotes = [];
-    
-    for (let barIndex = 0; barIndex < BARS_PER_HYPERBAR; barIndex++) {
+  private updateBarRhythmOnsets(barIndex: number, barStartTime: number): void {
+    if (barIndex >= 0 && barIndex < this.currentHyperbarRhythms.length) {
       const rhythmHex = this.currentHyperbarRhythms[barIndex];
       const onsets = parseRhythmHex(rhythmHex);
-      const barStartTime = startTime + barIndex * this.barSeconds;
-      
-      for (const onset of onsets) {
-        const noteTime = barStartTime + onset * this.sixteenthSeconds;
-        // Schedule notes for each voice (florid counterpoint)
-        for (let voiceIndex = 0; voiceIndex < NUM_VOICES; voiceIndex++) {
-          // Add slight timing offset for second voice to create more florid texture
-          const voiceOffset = voiceIndex * this.sixteenthSeconds * 0.25;  // 25% of 16th note
-          this.scheduledNotes.push({ 
-            time: noteTime + voiceOffset, 
-            barIndex, 
-            voiceIndex 
-          });
-        }
-      }
+      this.currentRhythmOnsets = onsets.map(onset => barStartTime + onset * this.sixteenthSeconds);
     }
-    
-    // Sort by time
-    this.scheduledNotes.sort((a, b) => a.time - b.time);
-    this.scheduledNoteIndex = 0;
   }
 
   private refreshPitchClasses(barIndex: number): void {
     if (barIndex >= 0 && barIndex < this.currentHyperbarChords.length) {
       const chord = this.currentHyperbarChords[barIndex];
       this.activePitchClasses = chord.asSequence();
-      
-      // Generate a new strumming pattern for this chord
-      this.generateStrumPattern();
-      
-      // Generate a new permuted arpeggio sequence
-      this.generateArpeggioSequence();
-      
-      // Start arpeggio at a random position in the new sequence
-      this.arpeggioIndex = this.arpeggioSequence.length > 0 
-        ? Math.floor(Math.random() * this.arpeggioSequence.length) 
-        : 0;
       
       if (this.onChordChange) {
         this.onChordChange(chord.toString());
@@ -683,121 +625,71 @@ export class MusicEngine {
   }
 
   /**
-   * Generate a permuted arpeggio sequence spanning multiple octaves.
-   * Extends the chord notes across 2 octaves for a longer sequence, then permutes.
+   * Calculate the current Hawkes process intensity.
+   * Combines base rate with excitation from recent events and rhythm proximity.
+   * All Hawkes parameters are beat-relative and scale with BPM.
    */
-  private generateArpeggioSequence(): void {
-    const chordNotes = this.activePitchClasses;
-    if (chordNotes.length === 0) {
-      this.arpeggioSequence = [];
-      return;
+  private calculateHawkesIntensity(currentTime: number): number {
+    // Convert beat-relative parameters to time-relative
+    const beatsPerSecond = this.bpm / 60;
+    const baseRatePerSecond = this.hawkesBaseRate * beatsPerSecond;
+    const decayPerSecond = this.hawkesDecay * beatsPerSecond;
+    
+    // Clean up old events (older than 4 beats)
+    const cutoffTime = currentTime - (4 / beatsPerSecond);
+    this.hawkesEventTimes = this.hawkesEventTimes.filter(t => t > cutoffTime);
+    
+    // Calculate excitation from recent events
+    let excitation = 0;
+    for (const eventTime of this.hawkesEventTimes) {
+      const timeSinceEvent = currentTime - eventTime;
+      excitation += this.hawkesExcitation * beatsPerSecond * Math.exp(-decayPerSecond * timeSinceEvent);
     }
     
-    // Extend chord notes across 2 octaves to create a longer sequence
-    // e.g., for chord [0, 4, 7] we get: [0+0, 4+0, 7+0, 0+1, 4+1, 7+1]
-    const numOctaves = 2;
-    const extendedSequence: { pitch: number; octaveOffset: number }[] = [];
-    
-    for (let octave = 0; octave < numOctaves; octave++) {
-      for (const pitch of chordNotes) {
-        extendedSequence.push({ pitch, octaveOffset: octave });
+    // Calculate rhythm proximity boost (also scales with tempo)
+    // Increase intensity when approaching rhythm onsets from the pattern (only future onsets)
+    let rhythmBoost = 0;
+    for (const onsetTime of this.currentRhythmOnsets) {
+      const distanceToOnset = onsetTime - currentTime;  // Positive = onset is in future
+      // Only boost for upcoming onsets (within 1/8 note ahead)
+      if (distanceToOnset > 0 && distanceToOnset < this.sixteenthSeconds * 2) {
+        rhythmBoost += 3.0 * beatsPerSecond * Math.exp(-distanceToOnset / (this.sixteenthSeconds * 0.5));
       }
     }
     
-    const n = extendedSequence.length;
-    
-    if (n <= 1) {
-      this.arpeggioSequence = extendedSequence;
-      return;
-    }
-    
-    // Get all coprimes with n and pick one randomly
-    const coprimes = getCoprimes(n);
-    const k = coprimes[Math.floor(Math.random() * coprimes.length)];
-    
-    // Generate permutation: perm[i] = (i * k) % n
-    const permutation = generateMultiplierPermutation(n, k);
-    
-    // Apply permutation to the extended sequence
-    this.arpeggioSequence = permutation.map(idx => extendedSequence[idx]);
-    
-    console.log('Arpeggio permutation: n=', n, 'k=', k, 'sequence=', 
-      this.arpeggioSequence.map(s => `${s.pitch}+${s.octaveOffset}`).join(', '));
+    return baseRatePerSecond + excitation + rhythmBoost;
   }
 
   /**
-   * Generate a strumming pattern for the current chord.
-   * Creates musical patterns like guitar strumming with varied directions and note groupings.
+   * Sample the next event time from the Hawkes process using thinning algorithm.
    */
-  private generateStrumPattern(): void {
-    const n = this.activePitchClasses.length;
-    if (n === 0) {
-      this.currentStrumPattern = [];
-      this.strumPatternIndex = 0;
-      return;
-    }
-
-    // Different strumming pattern types
-    const patternType = Math.floor(Math.random() * 6);
-    const pattern: number[] = [];
+  private sampleNextHawkesEventTime(currentTime: number): number {
+    // Use thinning (Ogata's algorithm) to sample from non-homogeneous Poisson process
+    const beatsPerSecond = this.bpm / 60;
+    let t = currentTime;
+    // Upper bound on intensity (converted to per-second)
+    const maxIntensity = (this.hawkesBaseRate + this.hawkesExcitation * this.hawkesEventTimes.length + 6.0) * beatsPerSecond;
     
-    switch (patternType) {
-      case 0:
-        // Down strum (low to high)
-        for (let i = 0; i < n; i++) pattern.push(i);
-        // Up strum (high to low)
-        for (let i = n - 1; i >= 0; i--) pattern.push(i);
-        break;
-        
-      case 1:
-        // Alternating bass + chord strum pattern
-        // Bass note, then upper notes, repeat with variation
-        pattern.push(0);  // Bass
-        for (let i = Math.floor(n / 2); i < n; i++) pattern.push(i);  // Upper
-        pattern.push(n > 1 ? 1 : 0);  // Second bass
-        for (let i = Math.floor(n / 2); i < n; i++) pattern.push(i);  // Upper again
-        break;
-        
-      case 2:
-        // Broken chord with skips (more elaborate)
-        for (let i = 0; i < n; i += 2) pattern.push(i);  // Odds
-        for (let i = n - 1; i >= 0; i -= 2) pattern.push(i);  // Evens reverse
-        for (let i = 1; i < n; i += 2) pattern.push(i);  // Evens
-        break;
-        
-      case 3:
-        // Pendulum pattern (outside to inside to outside)
-        for (let i = 0; i < Math.ceil(n / 2); i++) {
-          pattern.push(i);
-          if (n - 1 - i !== i) pattern.push(n - 1 - i);
-        }
-        for (let i = Math.floor(n / 2) - 1; i >= 0; i--) {
-          pattern.push(i);
-          if (n - 1 - i !== i) pattern.push(n - 1 - i);
-        }
-        break;
-        
-      case 4:
-        // Cascading down with repeated top note
-        for (let rep = 0; rep < 2; rep++) {
-          pattern.push(n - 1);  // Top note
-          for (let i = n - 2; i >= 0; i--) pattern.push(i);
-        }
-        break;
-        
-      case 5:
-        // Travis picking style (bass alternates with melody)
-        const bassNotes = [0, n > 2 ? 1 : 0];
-        const melodyNotes = n > 2 ? [n - 1, n - 2, n - 1] : [n - 1];
-        for (let i = 0; i < 4; i++) {
-          pattern.push(bassNotes[i % 2]);
-          if (i < melodyNotes.length) pattern.push(melodyNotes[i]);
-        }
-        break;
+    while (true) {
+      // Sample from homogeneous Poisson with rate = maxIntensity
+      const u1 = Math.random();
+      const interarrival = -Math.log(u1) / maxIntensity;
+      t += interarrival;
+      
+      // Accept/reject based on actual intensity
+      const actualIntensity = this.calculateHawkesIntensity(t);
+      const u2 = Math.random();
+      
+      if (u2 <= actualIntensity / maxIntensity) {
+        return t;  // Accept this event time
+      }
+      // Otherwise reject and continue sampling
+      
+      // Safety: don't look more than 4 beats ahead
+      if (t > currentTime + (4 / beatsPerSecond)) {
+        return currentTime + (0.5 / beatsPerSecond) + Math.random() * (0.5 / beatsPerSecond);
+      }
     }
-    
-    this.currentStrumPattern = pattern;
-    this.strumPatternIndex = 0;
   }
 
   private createDelayMixNode(): GainNode | null {
@@ -1035,135 +927,54 @@ export class MusicEngine {
     });
   }
 
-  private triggerRandomNote(whenTime: number, voiceIndex: number, barIndex: number): void {
+  /**
+   * Trigger a note from the Hawkes process
+   */
+  private triggerHawkesNote(whenTime: number): void {
+    // Determine current bar from time
+    const timeInHyperbar = whenTime - this.hyperbarStartTime;
+    const barIndex = Math.floor(timeInHyperbar / this.barSeconds);
+    
     // Update chord if bar changed
-    if (barIndex !== this.currentBarIndex) {
+    if (barIndex !== this.currentBarIndex && barIndex >= 0 && barIndex < BARS_PER_HYPERBAR) {
       this.currentBarIndex = barIndex;
       this.refreshPitchClasses(barIndex);
+      // Update rhythm onsets for the new bar
+      const barStartTime = this.hyperbarStartTime + barIndex * this.barSeconds;
+      this.updateBarRhythmOnsets(barIndex, barStartTime);
     }
     
     if (this.activePitchClasses.length === 0) {
       return;
     }
 
-    let pitchClass: number;
+    // Record event time for Hawkes excitation
+    this.hawkesEventTimes.push(whenTime);
     
-    if (voiceIndex === 0 && this.currentStrumPattern.length > 0) {
-      // Voice 0: Strumming pattern - follow the generated pattern at slower rate
-      this.strumTriggerCounter++;
-      if (this.strumTriggerCounter < this.STRUM_DIVISOR) {
-        return;  // Skip this trigger to slow down the strum
-      }
-      this.strumTriggerCounter = 0;
-      
-      const chordIndex = this.currentStrumPattern[this.strumPatternIndex];
-      pitchClass = this.activePitchClasses[Math.min(chordIndex, this.activePitchClasses.length - 1)];
-      
-      // Advance through the strum pattern
-      this.strumPatternIndex = (this.strumPatternIndex + 1) % this.currentStrumPattern.length;
-    } else {
-      // Voice 1: Random florid counterpoint
-      pitchClass = this.activePitchClasses[
-        Math.floor(Math.random() * this.activePitchClasses.length)
-      ];
-    }
+    // Pick a random pitch from the current chord
+    const pitchClass = this.activePitchClasses[
+      Math.floor(Math.random() * this.activePitchClasses.length)
+    ];
     
-    // Smooth octave evolution per voice: change by at most 1
+    // Smooth octave evolution: change by at most 1
     const octaveChange = Math.floor(Math.random() * 3) - 1;  // -1, 0, or 1
-    this.currentOctaves[voiceIndex] = Math.max(
+    this.currentOctave = Math.max(
       OCTAVE_MIN, 
-      Math.min(OCTAVE_MAX, this.currentOctaves[voiceIndex] + octaveChange)
+      Math.min(OCTAVE_MAX, this.currentOctave + octaveChange)
     );
     
-    const octave = this.currentOctaves[voiceIndex];
+    const octave = this.currentOctave;
     const midi = octave * 12 + pitchClass;
     const frequency = midiToFreq(midi);
     const maxDurationSeconds = musicalDurationToSeconds(this.synthParams.maxNoteDuration, this.bpm);
-    const duration = maxDurationSeconds * (0.5 + Math.random() * 0.5);
+    const duration = maxDurationSeconds * (0.3 + Math.random() * 0.7);
 
-    console.log('Triggering note:', { voice: voiceIndex, pitchClass, octave, frequency: frequency.toFixed(1), whenTime: whenTime.toFixed(2) });
+    console.log('Hawkes note:', { pitchClass, octave, frequency: frequency.toFixed(1), whenTime: whenTime.toFixed(2), intensity: this.calculateHawkesIntensity(whenTime).toFixed(2) });
     
     this.triggerNote(frequency, whenTime, duration);
     
     if (this.onNoteTriggered) {
       this.onNoteTriggered(pitchClass);
-    }
-  }
-
-  /**
-   * Trigger an arpeggio note - independent voice with regular meter and variable up/down patterns
-   */
-  private triggerArpeggioNote(whenTime: number): void {
-    if (this.arpeggioSequence.length === 0) {
-      return;
-    }
-
-    // 80% probability of playing a note (20% chance of rest)
-    if (Math.random() > 0.8) {
-      // Advance the arpeggio index even when skipping, to maintain musical continuity
-      this.advanceArpeggioIndex();
-      return;
-    }
-
-    // Get current note from permuted arpeggio sequence
-    const note = this.arpeggioSequence[this.arpeggioIndex];
-    const pitchClass = note.pitch;
-    const octave = this.arpeggioBaseOctave + note.octaveOffset;
-    
-    // Advance the arpeggio index for the next note
-    this.advanceArpeggioIndex();
-    
-    // Clamp final octave to valid range
-    const clampedOctave = Math.max(OCTAVE_MIN, Math.min(OCTAVE_MAX, octave));
-    const midi = clampedOctave * 12 + pitchClass;
-    const frequency = midiToFreq(midi);
-    // Arpeggio notes are shorter and more consistent
-    const duration = this.sixteenthSeconds * 0.9;
-
-    console.log('Triggering arpeggio:', { pitchClass, octave: clampedOctave, frequency: frequency.toFixed(1), whenTime: whenTime.toFixed(2) });
-    
-    this.triggerNote(frequency, whenTime, duration);
-    
-    if (this.onNoteTriggered) {
-      this.onNoteTriggered(pitchClass);
-    }
-  }
-
-  /**
-   * Advance the arpeggio index to the next note, handling direction changes and boundary wrapping.
-   */
-  private advanceArpeggioIndex(): void {
-    // Check if we need to pick a new direction and step count
-    if (this.arpeggioStepsRemaining <= 0) {
-      // Pick a random number of steps (2 to 6) and a random direction
-      this.arpeggioStepsRemaining = 2 + Math.floor(Math.random() * 5);  // 2-6 steps
-      // Randomly decide direction, but bias towards reversing if at edges
-      if (this.arpeggioIndex <= 0) {
-        this.arpeggioDirection = 1;  // Must go up
-      } else if (this.arpeggioIndex >= this.arpeggioSequence.length - 1) {
-        this.arpeggioDirection = -1;  // Must go down
-      } else {
-        this.arpeggioDirection = Math.random() < 0.5 ? 1 : -1;  // Random
-      }
-    }
-    
-    // Move to next note in arpeggio
-    this.arpeggioIndex += this.arpeggioDirection;
-    this.arpeggioStepsRemaining--;
-    
-    // Handle boundary wrapping with base octave changes
-    if (this.arpeggioIndex >= this.arpeggioSequence.length) {
-      // Wrap to bottom, shift base octave up
-      this.arpeggioIndex = 0;
-      if (this.arpeggioBaseOctave < OCTAVE_MAX - 1) {
-        this.arpeggioBaseOctave++;
-      }
-    } else if (this.arpeggioIndex < 0) {
-      // Wrap to top, shift base octave down
-      this.arpeggioIndex = this.arpeggioSequence.length - 1;
-      if (this.arpeggioBaseOctave > OCTAVE_MIN) {
-        this.arpeggioBaseOctave--;
-      }
     }
   }
 
@@ -1180,37 +991,34 @@ export class MusicEngine {
       const newHyperbarStart = this.hyperbarStartTime + this.hyperbarSeconds;
       this.hyperbarStartTime = newHyperbarStart;
       this.generateHyperbar();
-      this.scheduleHyperbarNotes(newHyperbarStart);
+      // Initialize first bar's rhythm onsets
+      this.updateBarRhythmOnsets(0, newHyperbarStart);
+      this.currentBarIndex = -1;  // Will be updated on first note
       console.log('New hyperbar:', this.currentHyperbarRhythms);
     }
 
-    // Check for note events from the scheduled notes
-    while (this.scheduledNoteIndex < this.scheduledNotes.length) {
-      const note = this.scheduledNotes[this.scheduledNoteIndex];
-      if (note.time <= currentTime + lookAhead) {
-        const noteTime = Math.max(note.time, currentTime + 0.02);
-        this.triggerRandomNote(noteTime, note.voiceIndex, note.barIndex);
-        this.scheduledNoteIndex++;
-      } else {
-        break;
-      }
+    // Update bar rhythm onsets if we've moved to a new bar
+    const timeInHyperbar = currentTime - this.hyperbarStartTime;
+    const currentBarIdx = Math.floor(timeInHyperbar / this.barSeconds);
+    if (currentBarIdx !== this.currentBarIndex && currentBarIdx >= 0 && currentBarIdx < BARS_PER_HYPERBAR) {
+      const barStartTime = this.hyperbarStartTime + currentBarIdx * this.barSeconds;
+      this.updateBarRhythmOnsets(currentBarIdx, barStartTime);
     }
 
-    // Schedule arpeggio notes independently on regular intervals (rate changes every 2 beats)
-    while (this.nextArpeggioTime <= currentTime + lookAhead) {
-      // Check if we should change the arpeggio rate (every 2 beats)
-      // Calculate current beat from arpeggio time (1 beat = 4 sixteenths)
-      const currentBeat = Math.floor((this.nextArpeggioTime - this.hyperbarStartTime) / (this.sixteenthSeconds * 4));
-      if (currentBeat >= this.arpeggioLastRateChangeBeat + 2) {
-        this.arpeggioLastRateChangeBeat = currentBeat;
-        this.arpeggioRateMultiplier = this.ARPEGGIO_RATE_OPTIONS[
-          Math.floor(Math.random() * this.ARPEGGIO_RATE_OPTIONS.length)
-        ];
-      }
+    // Schedule Hawkes process notes
+    while (this.nextHawkesCheckTime <= currentTime + lookAhead) {
+      // Sample next event time from Hawkes process
+      const nextEventTime = this.sampleNextHawkesEventTime(this.nextHawkesCheckTime);
       
-      const noteTime = Math.max(this.nextArpeggioTime, currentTime + 0.02);
-      this.triggerArpeggioNote(noteTime);
-      this.nextArpeggioTime += this.sixteenthSeconds * 2 * this.arpeggioRateMultiplier;
+      if (nextEventTime <= currentTime + lookAhead) {
+        const noteTime = Math.max(nextEventTime, currentTime + 0.02);
+        this.triggerHawkesNote(noteTime);
+        this.nextHawkesCheckTime = nextEventTime + 0.01;  // Small gap to avoid duplicate triggers
+      } else {
+        // Next event is beyond lookahead, update check time and break
+        this.nextHawkesCheckTime = nextEventTime;
+        break;
+      }
     }
 
     // Schedule next check
@@ -1272,25 +1080,22 @@ export class MusicEngine {
       const startTime = this.audioContext.currentTime;
       this.hyperbarStartTime = startTime;
       
-      // Reset octaves for each voice
-      for (let i = 0; i < NUM_VOICES; i++) {
-        const baseOctave = Math.floor((OCTAVE_MIN + OCTAVE_MAX) / 2);
-        this.currentOctaves[i] = baseOctave + (i === 0 ? 0 : 1);  // Voice 0 lower, Voice 1 higher
-      }
+      // Reset octave to middle of range
+      this.currentOctave = Math.floor((OCTAVE_MIN + OCTAVE_MAX) / 2);
       
-      // Reset arpeggio state
-      this.arpeggioIndex = 0;
-      this.arpeggioDirection = 1;
-      this.arpeggioBaseOctave = Math.floor((OCTAVE_MIN + OCTAVE_MAX) / 2);
-      this.arpeggioStepsRemaining = 0;  // Will pick new direction/steps on first note
-      this.nextArpeggioTime = startTime;  // Start arpeggio immediately
+      // Reset Hawkes process state
+      this.hawkesEventTimes = [];
+      this.nextHawkesCheckTime = startTime;
+      this.currentRhythmOnsets = [];
       
       // Reset bar index
       this.currentBarIndex = -1;
       
-      // Generate first hyperbar and schedule its notes
+      // Generate first hyperbar
       this.generateHyperbar();
-      this.scheduleHyperbarNotes(startTime);
+      
+      // Initialize rhythm onsets for first bar
+      this.updateBarRhythmOnsets(0, startTime);
       
       // Initialize pitch classes from first chord
       this.refreshPitchClasses(0);
@@ -1304,7 +1109,7 @@ export class MusicEngine {
         this.onPlayStateChange(true);
       }
       
-      console.log('Starting scheduler');
+      console.log('Starting Hawkes process scheduler');
       this.scheduler();
     } catch (error) {
       console.error('Failed to start audio engine:', error);
@@ -1403,7 +1208,7 @@ export class MusicEngine {
   }
 
   /**
-   * Interface for a scheduled note event (for offline rendering)
+   * Interface for a scheduled note event (for offline rendering using Hawkes process)
    */
   private generateNoteEvents(numHyperbars: number): { time: number; frequency: number; duration: number; midi: number; velocity: number }[] {
     const events: { time: number; frequency: number; duration: number; midi: number; velocity: number }[] = [];
@@ -1413,150 +1218,77 @@ export class MusicEngine {
     const savedScale = [...this.currentScale];
     const savedKey = this.currentKey;
     const savedBarIndex = this.currentBarIndex;
-    const savedStrumIndex = this.strumPatternIndex;
-    const savedStrumCounter = this.strumTriggerCounter;
-    const savedArpeggioIndex = this.arpeggioIndex;
-    const savedArpeggioDirection = this.arpeggioDirection;
-    const savedArpeggioBaseOctave = this.arpeggioBaseOctave;
-    const savedArpeggioSteps = this.arpeggioStepsRemaining;
-    const savedArpeggioSequence = this.arpeggioSequence.map(s => ({...s}));
-    const savedOctaves = [...this.currentOctaves];
+    const savedOctave = this.currentOctave;
+    const savedRhythmOnsets = [...this.currentRhythmOnsets];
     
     // Reset state for rendering
     this.currentScaleRotation = Math.floor(Math.random() * 12);
     this.currentScale = getBebopScale(this.currentScaleRotation);
     this.currentKey = getKeyFromRotation(this.currentScaleRotation);
     this.currentBarIndex = -1;
-    this.strumPatternIndex = 0;
-    this.strumTriggerCounter = 0;
-    this.arpeggioIndex = 0;
-    this.arpeggioDirection = 1;
-    this.arpeggioBaseOctave = Math.floor((OCTAVE_MIN + OCTAVE_MAX) / 2);
-    this.arpeggioStepsRemaining = 0;
-    for (let i = 0; i < NUM_VOICES; i++) {
-      const baseOctave = Math.floor((OCTAVE_MIN + OCTAVE_MAX) / 2);
-      this.currentOctaves[i] = baseOctave + (i === 0 ? 0 : 1);
-    }
+    this.currentOctave = Math.floor((OCTAVE_MIN + OCTAVE_MAX) / 2);
     
-    let currentTime = 0;
-    let arpeggioRateMultiplier = 1;
-    let arpeggioLastRateChangeBeat = -2;
-    let arpeggioIntervalSeconds = this.sixteenthSeconds * 2;
-    let nextArpTime = 0;
+    // For offline rendering, use a simpler approach:
+    // Sample notes at rhythm onsets with some randomization, plus additional random notes
+    // This avoids the Hawkes feedback loop issue while maintaining musical character
+    const avgNotesPerBeat = this.hawkesBaseRate;
     
     for (let hyperbar = 0; hyperbar < numHyperbars; hyperbar++) {
+      const hyperbarStart = hyperbar * this.hyperbarSeconds;
+      
       // Generate hyperbar data
       this.generateHyperbar();
       
       // Process each bar
       for (let barIndex = 0; barIndex < BARS_PER_HYPERBAR; barIndex++) {
-        // Update chord if bar changed
-        if (barIndex !== this.currentBarIndex) {
+        const barStartTime = hyperbarStart + barIndex * this.barSeconds;
+        
+        // Update chord for this bar
+        if (barIndex >= 0 && barIndex < this.currentHyperbarChords.length) {
           this.currentBarIndex = barIndex;
+          const chord = this.currentHyperbarChords[barIndex];
+          this.activePitchClasses = chord.asSequence();
           
-          if (barIndex >= 0 && barIndex < this.currentHyperbarChords.length) {
-            const chord = this.currentHyperbarChords[barIndex];
-            this.activePitchClasses = chord.asSequence();
-            this.generateStrumPattern();
-            this.generateArpeggioSequence();
-            this.arpeggioIndex = 0;
+          // Get rhythm onsets for this bar
+          const rhythmHex = this.currentHyperbarRhythms[barIndex];
+          const onsets = parseRhythmHex(rhythmHex);
+          this.currentRhythmOnsets = onsets.map(onset => barStartTime + onset * this.sixteenthSeconds);
+        }
+        
+        if (this.activePitchClasses.length === 0) continue;
+        
+        // Generate notes near rhythm onsets (with probability based on excitation)
+        for (const onsetTime of this.currentRhythmOnsets) {
+          // Higher base rate = higher probability of playing on rhythm
+          const playProbability = Math.min(0.9, avgNotesPerBeat * 0.3);
+          if (Math.random() < playProbability) {
+            // Add slight timing variation
+            const timeOffset = (Math.random() - 0.5) * this.sixteenthSeconds * 0.2;
+            const noteTime = onsetTime + timeOffset;
+            
+            this.addNoteEvent(events, noteTime);
+            
+            // Excitation: chance of additional clustered notes
+            let clusterCount = 0;
+            let clusterTime = noteTime;
+            while (Math.random() < this.hawkesExcitation * 0.3 && clusterCount < 3) {
+              clusterTime += this.sixteenthSeconds * (0.1 + Math.random() * 0.3);
+              this.addNoteEvent(events, clusterTime);
+              clusterCount++;
+            }
           }
         }
         
-        const rhythmHex = this.currentHyperbarRhythms[barIndex];
-        const onsets = parseRhythmHex(rhythmHex);
-        const barStartTime = currentTime + barIndex * this.barSeconds;
+        // Add some random notes between rhythm onsets based on base rate
+        const barBeats = 4;
+        const expectedExtraNotes = avgNotesPerBeat * barBeats * 0.3;  // 30% additional random notes
+        const extraNotes = Math.floor(expectedExtraNotes + (Math.random() < (expectedExtraNotes % 1) ? 1 : 0));
         
-        for (const onset of onsets) {
-          const noteTime = barStartTime + onset * this.sixteenthSeconds;
-          
-          // Process each voice
-          for (let voiceIndex = 0; voiceIndex < NUM_VOICES; voiceIndex++) {
-            const voiceOffset = voiceIndex * this.sixteenthSeconds * 0.25;
-            const eventTime = noteTime + voiceOffset;
-            
-            if (this.activePitchClasses.length === 0) continue;
-            
-            let pitchClass: number;
-            let octave: number;
-            
-            if (voiceIndex === 0 && this.currentStrumPattern.length > 0) {
-              // Voice 0: Strumming pattern with slowdown
-              this.strumTriggerCounter++;
-              if (this.strumTriggerCounter < this.STRUM_DIVISOR) {
-                continue;
-              }
-              this.strumTriggerCounter = 0;
-              
-              const chordIndex = this.currentStrumPattern[this.strumPatternIndex];
-              pitchClass = this.activePitchClasses[Math.min(chordIndex, this.activePitchClasses.length - 1)];
-              this.strumPatternIndex = (this.strumPatternIndex + 1) % this.currentStrumPattern.length;
-            } else {
-              pitchClass = this.activePitchClasses[Math.floor(Math.random() * this.activePitchClasses.length)];
-            }
-            
-            const octaveChange = Math.floor(Math.random() * 3) - 1;
-            this.currentOctaves[voiceIndex] = Math.max(OCTAVE_MIN, Math.min(OCTAVE_MAX, this.currentOctaves[voiceIndex] + octaveChange));
-            octave = this.currentOctaves[voiceIndex];
-            
-            const midi = octave * 12 + pitchClass;
-            const frequency = midiToFreq(midi);
-            const maxDurationSeconds = musicalDurationToSeconds(this.synthParams.maxNoteDuration, this.bpm);
-            const duration = maxDurationSeconds * (0.5 + Math.random() * 0.5);
-            
-            events.push({ time: eventTime, frequency, duration, midi, velocity: 80 });
-          }
-          
-          // Arpeggio notes during this time window
-          while (nextArpTime <= noteTime + this.sixteenthSeconds && this.arpeggioSequence.length > 0) {
-            // Change arpeggio rate every 2 beats (1 beat = 4 sixteenths)
-            const currentBeat = Math.floor(nextArpTime / (this.sixteenthSeconds * 4));
-            if (currentBeat >= arpeggioLastRateChangeBeat + 2) {
-              arpeggioLastRateChangeBeat = currentBeat;
-              arpeggioRateMultiplier = this.ARPEGGIO_RATE_OPTIONS[
-                Math.floor(Math.random() * this.ARPEGGIO_RATE_OPTIONS.length)
-              ];
-              arpeggioIntervalSeconds = this.sixteenthSeconds * 2 * arpeggioRateMultiplier;
-            }
-            
-            const note = this.arpeggioSequence[this.arpeggioIndex];
-            const pitchClass = note.pitch;
-            const octave = this.arpeggioBaseOctave + note.octaveOffset;
-            
-            if (this.arpeggioStepsRemaining <= 0) {
-              this.arpeggioStepsRemaining = 2 + Math.floor(Math.random() * 5);
-              if (this.arpeggioIndex <= 0) {
-                this.arpeggioDirection = 1;
-              } else if (this.arpeggioIndex >= this.arpeggioSequence.length - 1) {
-                this.arpeggioDirection = -1;
-              } else {
-                this.arpeggioDirection = Math.random() < 0.5 ? 1 : -1;
-              }
-            }
-            
-            this.arpeggioIndex += this.arpeggioDirection;
-            this.arpeggioStepsRemaining--;
-            
-            if (this.arpeggioIndex >= this.arpeggioSequence.length) {
-              this.arpeggioIndex = 0;
-              if (this.arpeggioBaseOctave < OCTAVE_MAX - 1) this.arpeggioBaseOctave++;
-            } else if (this.arpeggioIndex < 0) {
-              this.arpeggioIndex = this.arpeggioSequence.length - 1;
-              if (this.arpeggioBaseOctave > OCTAVE_MIN) this.arpeggioBaseOctave--;
-            }
-            
-            const clampedOctave = Math.max(OCTAVE_MIN, Math.min(OCTAVE_MAX, octave));
-            const midi = clampedOctave * 12 + pitchClass;
-            const frequency = midiToFreq(midi);
-            const duration = this.sixteenthSeconds * 0.9;
-            
-            events.push({ time: nextArpTime, frequency, duration, midi, velocity: 60 });
-            nextArpTime += arpeggioIntervalSeconds;
-          }
+        for (let i = 0; i < extraNotes; i++) {
+          const randomTime = barStartTime + Math.random() * this.barSeconds;
+          this.addNoteEvent(events, randomTime);
         }
       }
-      
-      currentTime += this.hyperbarSeconds;
     }
     
     // Restore state
@@ -1564,16 +1296,32 @@ export class MusicEngine {
     this.currentScale = savedScale;
     this.currentKey = savedKey;
     this.currentBarIndex = savedBarIndex;
-    this.strumPatternIndex = savedStrumIndex;
-    this.strumTriggerCounter = savedStrumCounter;
-    this.arpeggioIndex = savedArpeggioIndex;
-    this.arpeggioDirection = savedArpeggioDirection;
-    this.arpeggioBaseOctave = savedArpeggioBaseOctave;
-    this.arpeggioStepsRemaining = savedArpeggioSteps;
-    this.arpeggioSequence = savedArpeggioSequence;
-    this.currentOctaves = savedOctaves;
+    this.currentOctave = savedOctave;
+    this.currentRhythmOnsets = savedRhythmOnsets;
     
     return events.sort((a, b) => a.time - b.time);
+  }
+
+  /**
+   * Helper to add a note event during offline rendering
+   */
+  private addNoteEvent(events: { time: number; frequency: number; duration: number; midi: number; velocity: number }[], noteTime: number): void {
+    if (this.activePitchClasses.length === 0) return;
+    
+    const pitchClass = this.activePitchClasses[
+      Math.floor(Math.random() * this.activePitchClasses.length)
+    ];
+    
+    // Smooth octave evolution
+    const octaveChange = Math.floor(Math.random() * 3) - 1;
+    this.currentOctave = Math.max(OCTAVE_MIN, Math.min(OCTAVE_MAX, this.currentOctave + octaveChange));
+    
+    const midi = this.currentOctave * 12 + pitchClass;
+    const frequency = midiToFreq(midi);
+    const maxDurationSeconds = musicalDurationToSeconds(this.synthParams.maxNoteDuration, this.bpm);
+    const duration = maxDurationSeconds * (0.3 + Math.random() * 0.7);
+    
+    events.push({ time: noteTime, frequency, duration, midi, velocity: 70 });
   }
 
   /**
